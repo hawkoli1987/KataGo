@@ -80,3 +80,28 @@
 2. cpp里面主程序的subcommand其实只理解了一个大概，主要就是命令的功能需要的输入和输出，离了解每个文件怎么来的还差距很远，不确定了解到什么程度，看起来有点没方向，需要明确是否搞错了目标。
 3. 我把源码直接git clone到了 home文件里面的虚拟系统下面的文件夹里面，这样我activate python的虚拟环境比较方便，目前还不清楚这样做是否有问题，还是没放在mnt下面只影响东西存在硬盘里面的哪个位置。
 
+## 问题解答
+1. 一步一步来，至少明白一个.sh文件的流程，跑通了，找到它生成的权重文件，对局数据，大概看懂了这些生成的文件的结构，再去跑下一个.sh文件。
+2. subcommand就像windows里软件的各种选项。就像你学习一个软件，不会需要去理解每个选项的功能，只需要知道自己对这个软件主要的需求
+    - 比如solidworks画齿轮，要先打个腹稿，比如2D画个圆，拉升，中间开个孔，边上画个齿，360度旋转复制，就得到一个齿轮。然后去找这些需求对应的功能。
+    - 具体对应到katago，你只需要知道你想要用katago做什么，比如synchronous_loop.sh是最基本的模型训练，上面已经给了你一个例子，包括训练步骤和默认参数，用cursor逐行解释,大概就能明白整个流程了。
+        - 比如你问cursor这个gatekeeper.sh是干嘛的，根据它以下回答，明白它大概是比较训练中产生的模型，并择优保存
+        ![alt text](20250326-1.png)
+        - selfpaly是模型的自我对弈，产生新的对局数据
+        - shuffle是打乱对局数据以确保训练数据的平均分布
+        - train是用刚才那步里面产生的对局训练模型，继续训练模型
+        - 然后export是导出这个循环训练结束后的模型权重
+3. WSL系统默认是安装在windows的C盘的，所以WSL home文件夹也在C盘， 如果你的C盘不是很大，最好把虚拟环境，模型权重，self play产生的训练数据这三个放到其他盘。
+4. 用好git，你就不需要单独传输文件, 也不需要创建一个文件的多个副本.
+    - 比如你改动的那个selfplay1.cfg, 你可以直接在你本地的git repo里面改，这样cursor可以帮你自动track你的改动，方便你查找原因。
+    ![alt text](20250326-3.png)
+    - 如果想要长期保存一个或多个修改，你可以git add，然后 git commit， git push. 
+    - 如果我回复了你这个文件，文件就在github 的remote repo上产生了更新，你就可以git pull, 你的本地对应文件也自动更新了。
+    - 我现在把这个文件的修改保存在一个新建的branch 'pyg'里,你可以在本地的cursor (连上WSL的) terminal 里 git switch pyg, 然后git pull, 你的本地文件就自动更新了。
+    - 你每周有新的进展和问题，也在本地这个文档里改，之后git add, git commit, gitpush, 我就可以看到你的更新了。我已经把你加成这个repo的collaborator,你就不用每次都开一个pull request了。记得你在此之前要设置一下github的ssh key(大概就是在本地创建一个ed25519 key pair,然后在github的settings里面创建一个对应这台本地电脑WSL的ssh access, 然后把这个public key复制粘贴到ssh access里面), 详细步骤问cursor.
+    ![alt text](20250326-4.png)
+
+5. 你也大致学习下cursor/VScode的功能，比如比较两个相似文件。 
+    ![alt text](20250326-2.png)
+6. 正如上图里你发的那个selfplay1test.cfg, 你改了cudaDeviceToUse=0，应该就是告诉系统你没有显卡，所以不会用GPU来训练。如果你想确认，可以直接问cursor chat （右下角的codebase可以查找整个repo）, 让它帮你找到这个参数定义。
+
