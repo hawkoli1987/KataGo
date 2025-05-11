@@ -680,7 +680,7 @@ int MainCmds::writetrainingdata(const vector<string>& args) {
   const int numSearchThreads = 1;
   const int numTotalThreads = numWorkerThreads * numSearchThreads;
 
-  const int dataBoardLen = cfg.getInt("dataBoardLen",3,37);
+  const int dataBoardLen = cfg.getInt("dataBoardLen",3,Board::MAX_LEN);
   const int maxApproxRowsPerTrainFile = cfg.getInt("maxApproxRowsPerTrainFile",1,100000000);
 
   const std::vector<std::pair<int,int>> allowedBoardSizes =
@@ -2336,6 +2336,7 @@ int MainCmds::writetrainingdata(const vector<string>& args) {
       const std::vector<ChangedNeuralNet*> changedNeuralNets;
       const bool hitTurnLimit = false;
       const int mode = 0;
+      const std::vector<QValueTargets> whiteQValueTargets;
 
       if(
         trainingWeights[m] > 1e-8
@@ -2357,6 +2358,7 @@ int MainCmds::writetrainingdata(const vector<string>& args) {
           policyEntropy,
           searchEntropy,
           whiteValueTargets,
+          whiteQValueTargets,
           turnIdx,
           valueTargetWeight,
           tdValueTargetWeight,

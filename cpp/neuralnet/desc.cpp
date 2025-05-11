@@ -944,7 +944,13 @@ PolicyHeadDesc::PolicyHeadDesc() : modelVersion(-1) {}
 PolicyHeadDesc::PolicyHeadDesc(istream& in, int vrsn, bool binaryFloats) {
   in >> name;
   modelVersion = vrsn;
-  policyOutChannels = modelVersion >= 12 ? 2 : 1;
+
+  if(modelVersion >= 16)
+    policyOutChannels = 4;
+  else if(modelVersion >= 12)
+    policyOutChannels = 2;
+  else
+    policyOutChannels = 1;
 
   if(in.fail())
     throw StringError(name + ": policy head failed to parse name");
@@ -1380,7 +1386,7 @@ void ModelDesc::iterConvLayers(std::function<void(const ConvLayerDesc& desc)> f)
 
 int ModelDesc::maxConvChannels(int convXSize, int convYSize) const {
   int c = 0;
-  auto f = [&c,convXSize,convYSize](const ConvLayerDesc& desc) {
+  auto f = [&c,convXSize,convYSize](const ConvLayerDesc& desc) noexcept {
     if(desc.convXSize == convXSize && desc.convYSize == convYSize) {
       if(desc.inChannels > c)
         c = desc.inChannels;
