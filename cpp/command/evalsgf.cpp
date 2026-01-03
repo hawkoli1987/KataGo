@@ -178,7 +178,7 @@ int MainCmds::evalsgf(const vector<string>& args) {
 
   //Parse sgf file and board ------------------------------------------------------------------
 
-  CompactSgf* sgf = CompactSgf::loadFile(sgfFile);
+  std::unique_ptr<CompactSgf> sgf = CompactSgf::loadFile(sgfFile);
 
   Board board;
   Player nextPla;
@@ -642,6 +642,7 @@ int MainCmds::evalsgf(const vector<string>& args) {
       bool includeMovesOwnershipStdev = false;
       bool includePVVisits = true;
       nlohmann::json ret;
+      bool includeNoResultValue = false;
       bool suc = search->getAnalysisJson(
         perspective,
         analysisPVLen,
@@ -652,6 +653,7 @@ int MainCmds::evalsgf(const vector<string>& args) {
         includeMovesOwnership,
         includeMovesOwnershipStdev,
         includePVVisits,
+        includeNoResultValue,
         ret
       );
       if(suc) {
@@ -699,7 +701,6 @@ int MainCmds::evalsgf(const vector<string>& args) {
   if(humanEval != NULL)
     delete humanEval;
   NeuralNet::globalCleanup();
-  delete sgf;
   ScoreValue::freeTables();
 
   return 0;

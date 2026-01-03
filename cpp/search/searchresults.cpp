@@ -919,6 +919,7 @@ AnalysisData Search::getAnalysisDataOfSingleChild(
     data.scoreUtility = getScoreUtility(parentScoreMean,parentScoreMean*parentScoreMean+parentScoreStdev*parentScoreStdev);
     data.resultUtility = fpuValue - data.scoreUtility;
     data.winLossValue = searchParams.winLossUtilityFactor == 1.0 ? parentWinLossValue + (fpuValue - parentUtility) : 0.0;
+    data.noResultValue = 0.0;
     // Make sure winloss values due to FPU don't go out of bounds for purposes of reporting to UI
     if(data.winLossValue < -1.0)
       data.winLossValue = -1.0;
@@ -940,6 +941,7 @@ AnalysisData Search::getAnalysisDataOfSingleChild(
     data.resultUtility = getResultUtility(winLossValueAvg, noResultValueAvg);
     data.scoreUtility = getScoreUtility(scoreMeanAvg, scoreMeanSqAvg);
     data.winLossValue = winLossValueAvg;
+    data.noResultValue = noResultValueAvg;
     data.scoreMean = scoreMeanAvg;
     data.scoreStdev = ScoreValue::getScoreStdev(scoreMeanAvg,scoreMeanSqAvg);
     data.lead = leadAvg;
@@ -1998,6 +2000,7 @@ bool Search::getAnalysisJson(
   bool includeMovesOwnership,
   bool includeMovesOwnershipStdev,
   bool includePVVisits,
+  bool includeNoResultValue,
   json& ret
 ) const {
   vector<AnalysisData> buf;
@@ -2047,6 +2050,8 @@ bool Search::getAnalysisJson(
     moveInfo["scoreSelfplay"] = Global::roundDynamic(scoreMean,OUTPUT_PRECISION);
     moveInfo["scoreLead"] = Global::roundDynamic(lead,OUTPUT_PRECISION);
     moveInfo["scoreStdev"] = Global::roundDynamic(data.scoreStdev,OUTPUT_PRECISION);
+    if(includeNoResultValue)
+      moveInfo["noResultValue"] = Global::roundDynamic(data.noResultValue,OUTPUT_PRECISION);
     moveInfo["prior"] = Global::roundDynamic(data.policyPrior,OUTPUT_PRECISION);
     if(humanOutput != NULL)
       moveInfo["humanPrior"] = Global::roundDynamic(std::max(0.0,(double)humanOutput->policyProbs[getPos(data.move)]),OUTPUT_PRECISION);
@@ -2313,4 +2318,27 @@ bool Search::getPrunedNodeValues(const SearchNode* nodePtr, ReportedSearchValues
     node.stats.visits.load(std::memory_order_acquire)
   );
   return true;
+}
+
+void Search::debugPrintChildrenSummary(std::ostream& out, const SearchNode& node, NNOutput* nnOutput) {
+  SearchNodeState nodeState = node.state.load(std::memory_order_acquire);
+  int numChildren = 0;
+  ConstSearchNodeChildrenReference children = node.getChildren(nodeState);
+  int childrenCapacity = children.getCapacity();
+  out << "childrenCapacity " << childrenCapacity << endl;
+  const float* policyProbs = nnOutput->getPolicyProbsMaybeNoised();
+  for(int i = 0; i<childrenCapacity; i++) {
+    const SearchChildPointer& childPointer = children[i];
+    const SearchNode* child = childPointer.getIfAllocated();
+    if(child == NULL)
+      break;
+    numChildren += 1;
+    Loc moveLoc = childPointer.getMoveLocRelaxed();
+    int movePos = getPos(moveLoc);
+    float nnPolicyProb = policyProbs[movePos];
+    int64_t edgeVisits = childPointer.getEdgeVisits();
+    double childWeight = child->stats.getChildWeight(edgeVisits);
+    out << i << " " << Location::toString(moveLoc,rootBoard) << " " << nnPolicyProb << " " << edgeVisits << " " << childWeight << endl;
+  }
+  out << "numChildren " << numChildren << endl;
 }
