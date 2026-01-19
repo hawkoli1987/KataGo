@@ -1,0 +1,37 @@
+#!/bin/bash
+#PBS -N katago_dev
+#PBS -q AISG_large
+#PBS -l walltime=96:00:00
+#PBS -l select=1:mem=200gb:ncpus=32:ngpus=1:host=hopper-34
+#PBS -o /dev/null
+#PBS -e /dev/null
+#PBS -W umask=0007
+
+set -euo pipefail
+
+export SHARED_FS="/scratch/Projects/SPEC-SF-AISG"
+export SQSH_DIR="${SHARED_FS}/sqsh"
+export SQSH_FILE="${SQSH_DIR}/go.sqsh"
+export CONTAINER_NAME="katago_dev"
+export ENROOT_DATA_PATH="${SHARED_FS}/.enroot/data"
+
+mkdir -p "${ENROOT_DATA_PATH}"
+
+if [ ! -f "${SQSH_FILE}" ]; then
+  echo "Missing ${SQSH_FILE}. Run runtime/enroot_create.pbs first." >&2
+  exit 1
+fi
+
+# Create container if it doesn't exist
+if ! enroot list | grep -q "^${CONTAINER_NAME}$"; then
+  enroot create -n "${CONTAINER_NAME}" "${SQSH_FILE}"
+fi
+
+# Start container inside tmux session 'go'
+if ! tmux has-session -t go 2>/dev/null; then
+  tmux new-session -d -s go
+  tmux send-keys -t go \
+    "enroot start --root --rw --mount=${HOME}:${HOME} --mount=${SHARED_FS}:${SHARED_FS} ${CONTAINER_NAME} /bin/bash" C-m
+fi
+
+tmux attach -t go

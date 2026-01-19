@@ -1,0 +1,9 @@
+port: 9100
+
+# Reserved for later steps
+katago:
+  backend: ""
+  model_path: ""
+  binary_path: ""
+benchmark:
+  concurrency: ""

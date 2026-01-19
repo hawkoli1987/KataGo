@@ -1,0 +1,97 @@
+#!/bin/bash
+#PBS -N katago_enroot_create
+#PBS -q AISG_large
+#PBS -l walltime=24:00:00
+#PBS -l select=1:mem=200gb:ncpus=32:ngpus=1
+#PBS -o /dev/null
+#PBS -e /dev/null
+#PBS -W umask=0007
+
+set -euo pipefail
+
+# ===========================
+# 0. Run this inside a PBS interactive job on Hopper (qsub -I ...)
+# ===========================
+
+# Paths
+export SHARED_FS="/scratch/Projects/SPEC-SF-AISG"
+export SQSH_DIR="${SHARED_FS}/sqsh"
+export BASE_SQSH="${SQSH_DIR}/ubuntu_22.04.sqsh"
+export CONTAINER_NAME="katago_dev"
+export ENROOT_DATA_PATH="${SHARED_FS}/.enroot/data"
+
+LOG_DIR="${SQSH_DIR}/logs"
+mkdir -p "${LOG_DIR}" "${ENROOT_DATA_PATH}"
+
+# === 1. Create a writable build container from this base image ===
+if ! enroot list | grep -q "^${CONTAINER_NAME}$"; then
+  enroot create --name "${CONTAINER_NAME}" "${BASE_SQSH}"
+fi
+
+# ===========================
+# 2) Prepare an RC script to bypass any default entrypoint
+# ===========================
+RC_SCRIPT="${LOG_DIR}/katago_enroot_rc.sh"
+cat > "${RC_SCRIPT}" << 'RCEOF'
+#!/bin/bash
+exec "$@"
+RCEOF
+chmod +x "${RC_SCRIPT}"
+
+# ===========================
+# 3) Start the build container INTERACTIVELY with bash
+# ===========================
+enroot start \
+  --root \
+  --rw \
+  --rc "${RC_SCRIPT}" \
+  --mount "${HOME}:${HOME}" \
+  --mount "${SHARED_FS}:${SHARED_FS}" \
+  "${CONTAINER_NAME}" \
+  /bin/bash
+
+# === NOW YOU ARE INSIDE THE CONTAINER, AS ROOT, WITH A BASH SHELL ===
+# Inside the container, run (manually):
+#
+# export DEBIAN_FRONTEND=noninteractive
+# rm -f /etc/apt/sources.list.d/cuda.list
+# apt-get update
+#
+# # Core utilities + runtime deps
+# apt-get install -y \
+#     ca-certificates \
+#     wget curl git \
+#     bzip2 xz-utils unzip \
+#     python3 python3-pip \
+#     libgomp1 libstdc++6 libtinfo6
+#
+# # NVIDIA repo keyring (for CUDA + TensorRT)
+# apt-get install -y gpg
+# wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb -O /tmp/cuda-keyring.deb
+# dpkg -i /tmp/cuda-keyring.deb
+# apt-get update
+#
+# # CUDA runtime (Ubuntu repo)
+# apt-get install -y nvidia-cuda-toolkit
+#
+# # TensorRT runtime
+# apt-get install -y \
+#     libnvinfer8 \
+#     libnvinfer-plugin8 \
+#     libnvinfer-bin \
+#     libnvonnxparsers8 \
+#     libnvparsers8
+#
+# # Sanity checks
+# ldconfig -p | grep -E 'nvinfer|cudart'
+# nvcc --version
+#
+# When done, exit the container:
+# exit
+
+# ===========================
+# 4) After you exit the container, EXPORT the modified rootfs as a new sqsh
+# ===========================
+FINAL_SQSH="${SQSH_DIR}/go.sqsh"
+enroot export --output "${FINAL_SQSH}" "${CONTAINER_NAME}"
+
