@@ -27,11 +27,10 @@ if ! enroot list | grep -q "^${CONTAINER_NAME}$"; then
   enroot create -n "${CONTAINER_NAME}" "${SQSH_FILE}"
 fi
 
-# Start container inside tmux session 'go'
-if ! tmux has-session -t go 2>/dev/null; then
-  tmux new-session -d -s go
-  tmux send-keys -t go \
-    "enroot start --root --rw --mount=${HOME}:${HOME} --mount=${SHARED_FS}:${SHARED_FS} ${CONTAINER_NAME} /bin/bash" C-m
-fi
+# Start container directly (assumes you are already in tmux 'go')
+enroot start --root --rw \
+  --mount="${HOME}:${HOME}" \
+  --mount="${SHARED_FS}:${SHARED_FS}" \
+  "${CONTAINER_NAME}" \
+  /bin/bash
 
-tmux attach -t go
