@@ -2,8 +2,17 @@ port: 9100
 
 # Reserved for later steps
 katago:
-  backend: ""
-  model_path: ""
-  binary_path: ""
+  backend: "trt"
+  config_path: ""
+  threads: 384
+  batch_size: 384
+  model_path: "/scratch/Projects/SPEC-SF-AISG/katago/models/kata1-b28c512nbt-s12223529728-d5663671073.bin.gz"
+  cuda_binary_path: "/scratch/Projects/SPEC-SF-AISG/katago/bin/katago-cuda/katago"
+  trt_binary_path: "/scratch/Projects/SPEC-SF-AISG/katago/bin/katago-trt/katago"
 benchmark:
   concurrency: ""
+  matrix_csv: "runtime/benchmark/bench_matrix.csv"
+  results_dir: "runtime/benchmark/results"
+  gpu_log_interval_sec: 1
+  gpu_util_threshold: 90
+  gpu_mem_threshold: 90

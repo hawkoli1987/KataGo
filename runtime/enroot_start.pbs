@@ -1,7 +1,7 @@
 #!/bin/bash
 #PBS -N katago_dev
-#PBS -q AISG_large
-#PBS -l walltime=96:00:00
+#PBS -q AISG_debug
+#PBS -l walltime=24:00:00
 #PBS -l select=1:mem=200gb:ncpus=32:ngpus=1:host=hopper-34
 #PBS -o /dev/null
 #PBS -e /dev/null
@@ -14,6 +14,10 @@ export SQSH_DIR="${SHARED_FS}/sqsh"
 export SQSH_FILE="${SQSH_DIR}/go.sqsh"
 export CONTAINER_NAME="katago_dev"
 export ENROOT_DATA_PATH="${SHARED_FS}/.enroot/data"
+export HOST_NVIDIA_MOUNT="/opt/host-nvidia"
+export HOST_LIBCUDA="/lib64/libcuda.so.1"
+export HOST_LIBNVML="/lib64/libnvidia-ml.so.1"
+export LD_LIBRARY_PATH="${HOST_NVIDIA_MOUNT}:${LD_LIBRARY_PATH:-}"
 
 mkdir -p "${ENROOT_DATA_PATH}"
 
@@ -27,10 +31,21 @@ if ! enroot list | grep -q "^${CONTAINER_NAME}$"; then
   enroot create -n "${CONTAINER_NAME}" "${SQSH_FILE}"
 fi
 
-# Start container directly (assumes you are already in tmux 'go')
+# Ensure mount target exists inside the container rootfs
 enroot start --root --rw \
   --mount="${HOME}:${HOME}" \
   --mount="${SHARED_FS}:${SHARED_FS}" \
+  "${CONTAINER_NAME}" \
+  /bin/bash -lc "mkdir -p ${HOST_NVIDIA_MOUNT}"
+
+# Start container directly (assumes you are already in tmux 'go')
+enroot start --root --rw \
+  --env LD_LIBRARY_PATH \
+  --mount="${HOME}:${HOME}" \
+  --mount="${SHARED_FS}:${SHARED_FS}" \
+  --mount="${HOST_LIBCUDA}:${HOST_NVIDIA_MOUNT}/libcuda.so.1" \
+  --mount="${HOST_LIBNVML}:${HOST_NVIDIA_MOUNT}/libnvidia-ml.so.1" \
+  --mount="/usr/bin/nvidia-smi:/usr/bin/nvidia-smi" \
   "${CONTAINER_NAME}" \
   /bin/bash
 

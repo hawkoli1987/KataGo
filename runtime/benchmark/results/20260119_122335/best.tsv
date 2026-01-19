@@ -1,0 +1,4 @@
+category	backend	threads	batch_size	visits	num_positions	board_size	visits_per_sec	gpu_util_avg	gpu_util_max	gpu_mem_avg	gpu_mem_max	log_path
+overall	trt	384	384	3000	200	19	5138	50.03	97	1.10	1.38	/scratch/Projects/SPEC-SF-AISG/source_files/KataGo/runtime/benchmark/results/20260119_122335/trt_t384_b384_v3000_n200_s19.log
+cuda	cuda	384	384	3000	200	19	4749	81.08	96	1.12	1.18	/scratch/Projects/SPEC-SF-AISG/source_files/KataGo/runtime/benchmark/results/20260119_122335/cuda_t384_b384_v3000_n200_s19.log
+trt	trt	384	384	3000	200	19	5138	50.03	97	1.10	1.38	/scratch/Projects/SPEC-SF-AISG/source_files/KataGo/runtime/benchmark/results/20260119_122335/trt_t384_b384_v3000_n200_s19.log

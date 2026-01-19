@@ -19,7 +19,7 @@ mkdir -p "${OUT_DIR}"
 BEST_TSV="${OUT_DIR}/best.tsv"
 BEST_YAML="${OUT_DIR}/best_config.yaml"
 
-echo -e "category\tbackend\tthreads\tbatch_size\tvisits\tnum_positions\tboard_size\tvisits_per_sec\tlog_path" > "${BEST_TSV}"
+echo -e "category\tbackend\tthreads\tbatch_size\tvisits\tnum_positions\tboard_size\tvisits_per_sec\tgpu_util_avg\tgpu_util_max\tgpu_mem_avg\tgpu_mem_max\tlog_path" > "${BEST_TSV}"
 
 awk -F'\t' 'NR==1{next}
 {
@@ -36,7 +36,7 @@ END{
 
 {
   echo "best:"
-  tail -n +2 "${BEST_TSV}" | while IFS=$'\t' read -r category backend threads batch_size visits num_positions board_size visits_per_sec log_path; do
+  tail -n +2 "${BEST_TSV}" | while IFS=$'\t' read -r category backend threads batch_size visits num_positions board_size visits_per_sec gpu_util_avg gpu_util_max gpu_mem_avg gpu_mem_max log_path; do
     echo "  ${category}:"
     echo "    backend: \"${backend}\""
     echo "    threads: ${threads}"
@@ -45,6 +45,10 @@ END{
     echo "    num_positions: ${num_positions}"
     echo "    board_size: ${board_size}"
     echo "    visits_per_sec: ${visits_per_sec}"
+    echo "    gpu_util_avg: ${gpu_util_avg}"
+    echo "    gpu_util_max: ${gpu_util_max}"
+    echo "    gpu_mem_avg: ${gpu_mem_avg}"
+    echo "    gpu_mem_max: ${gpu_mem_max}"
     echo "    log_path: \"${log_path}\""
   done
 } > "${BEST_YAML}"

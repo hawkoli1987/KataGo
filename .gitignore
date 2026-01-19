@@ -56,6 +56,9 @@ out.txt
 # For vscode
 .vscode
 
+# For cursor
+.cursor
+
 # For VS
 .vs
 cpp/CMakeSettings.json

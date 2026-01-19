@@ -1,0 +1,11 @@
+backend	threads	batch_size	visits	num_positions	board_size	visits_per_sec	gpu_util_avg	gpu_util_max	gpu_mem_avg	gpu_mem_max	log_path
+cuda	64	64	800	10	19	2072	17.33	66	0.35	0.70	/scratch/Projects/SPEC-SF-AISG/source_files/KataGo/runtime/benchmark/results/20260119_122335/cuda_t64_b64_v800_n10_s19.log
+cuda	128	128	800	20	19	3554	31.57	94	0.43	0.80	/scratch/Projects/SPEC-SF-AISG/source_files/KataGo/runtime/benchmark/results/20260119_122335/cuda_t128_b128_v800_n20_s19.log
+cuda	192	192	1200	50	19	3789	51.04	95	0.66	0.89	/scratch/Projects/SPEC-SF-AISG/source_files/KataGo/runtime/benchmark/results/20260119_122335/cuda_t192_b192_v1200_n50_s19.log
+cuda	256	256	2000	100	19	4327	74.75	96	0.86	0.99	/scratch/Projects/SPEC-SF-AISG/source_files/KataGo/runtime/benchmark/results/20260119_122335/cuda_t256_b256_v2000_n100_s19.log
+cuda	384	384	3000	200	19	4749	81.08	96	1.12	1.18	/scratch/Projects/SPEC-SF-AISG/source_files/KataGo/runtime/benchmark/results/20260119_122335/cuda_t384_b384_v3000_n200_s19.log
+trt	64	64	800	10	19	3507	10.97	87	0.91	1.01	/scratch/Projects/SPEC-SF-AISG/source_files/KataGo/runtime/benchmark/results/20260119_122335/trt_t64_b64_v800_n10_s19.log
+trt	128	128	800	20	19	4277	12.28	90	0.97	1.07	/scratch/Projects/SPEC-SF-AISG/source_files/KataGo/runtime/benchmark/results/20260119_122335/trt_t128_b128_v800_n20_s19.log
+trt	192	192	1200	50	19	4578	17.01	92	1.02	1.15	/scratch/Projects/SPEC-SF-AISG/source_files/KataGo/runtime/benchmark/results/20260119_122335/trt_t192_b192_v1200_n50_s19.log
+trt	256	256	2000	100	19	4813	20.12	95	0.81	1.22	/scratch/Projects/SPEC-SF-AISG/source_files/KataGo/runtime/benchmark/results/20260119_122335/trt_t256_b256_v2000_n100_s19.log
+trt	384	384	3000	200	19	5138	50.03	97	1.10	1.38	/scratch/Projects/SPEC-SF-AISG/source_files/KataGo/runtime/benchmark/results/20260119_122335/trt_t384_b384_v3000_n200_s19.log

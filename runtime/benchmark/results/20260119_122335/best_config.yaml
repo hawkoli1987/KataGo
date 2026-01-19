@@ -1,0 +1,40 @@
+best:
+  overall:
+    backend: "trt"
+    threads: 384
+    batch_size: 384
+    visits: 3000
+    num_positions: 200
+    board_size: 19
+    visits_per_sec: 5138
+    gpu_util_avg: 50.03
+    gpu_util_max: 97
+    gpu_mem_avg: 1.10
+    gpu_mem_max: 1.38
+    log_path: "/scratch/Projects/SPEC-SF-AISG/source_files/KataGo/runtime/benchmark/results/20260119_122335/trt_t384_b384_v3000_n200_s19.log"
+  cuda:
+    backend: "cuda"
+    threads: 384
+    batch_size: 384
+    visits: 3000
+    num_positions: 200
+    board_size: 19
+    visits_per_sec: 4749
+    gpu_util_avg: 81.08
+    gpu_util_max: 96
+    gpu_mem_avg: 1.12
+    gpu_mem_max: 1.18
+    log_path: "/scratch/Projects/SPEC-SF-AISG/source_files/KataGo/runtime/benchmark/results/20260119_122335/cuda_t384_b384_v3000_n200_s19.log"
+  trt:
+    backend: "trt"
+    threads: 384
+    batch_size: 384
+    visits: 3000
+    num_positions: 200
+    board_size: 19
+    visits_per_sec: 5138
+    gpu_util_avg: 50.03
+    gpu_util_max: 97
+    gpu_mem_avg: 1.10
+    gpu_mem_max: 1.38
+    log_path: "/scratch/Projects/SPEC-SF-AISG/source_files/KataGo/runtime/benchmark/results/20260119_122335/trt_t384_b384_v3000_n200_s19.log"
