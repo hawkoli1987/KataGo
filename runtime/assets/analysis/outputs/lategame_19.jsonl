@@ -1,0 +1,1 @@
+{"id":"lategame_19","isDuringSearch":false,"turnNumber":62,"moveInfos":[{"move":"A19","order":0,"visits":1120,"winrate":0.64,"scoreLead":6.5,"prior":0.18,"pv":["A19","B19","A18"]},{"move":"T1","order":1,"visits":740,"winrate":0.61,"scoreLead":4.9,"prior":0.12,"pv":["T1","S1","T2"]}],"rootInfo":{"visits":2500,"winrate":0.63,"scoreLead":5.7,"currentPlayer":"B"}}

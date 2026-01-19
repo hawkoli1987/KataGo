@@ -17,11 +17,11 @@
   Prereqs: network access, `curl`, `unzip`. Runs on host or inside container.
 
 - List latest KataGo release assets (CUDA/TRT):
-  `python runtime/get_katago_release_assets.py`
+  `python3 runtime/get_katago_release_assets.py`
   Prereqs: network access. Optional args: `--repo`, `--include`, `--kinds`.
 
 - Scrape model URLs from katagotraining.org:
-  `python runtime/get_katago_model_urls.py`
+  `python3 runtime/get_katago_model_urls.py`
   Prereqs: network access. Optional args: `--base-url`, `--limit`.
 
 # Benchmarks
@@ -37,3 +37,17 @@
 - Select best config:
   `bash runtime/benchmark/select_best.sh runtime/benchmark/results/<run_id>/summary.tsv`
   Prereqs: `summary.tsv` from a completed run.
+
+# Analysis service
+- Start the FastAPI analysis server:
+  `uvicorn runtime.analysis_server:app --host 0.0.0.0 --port 9100`
+  Prereqs: run inside the container via `runtime/enroot_start.pbs`.
+  Install deps in-container: `pip install fastapi uvicorn pyyaml`.
+
+- Run the helper script (starts server, prompts for input, writes output):
+  `bash runtime/serve_analysis.sh`
+  Prereqs: same as above. Inputs live in `runtime/assets/analysis/inputs`.
+
+- Sample inputs/outputs:
+  Inputs: `runtime/assets/analysis/inputs/*.jsonl`
+  Outputs: `runtime/assets/analysis/outputs/*.jsonl`

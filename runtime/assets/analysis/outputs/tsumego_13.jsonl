@@ -1,0 +1,1 @@
+{"id":"tsumego_13","isDuringSearch":false,"turnNumber":0,"moveInfos":[{"move":"B6","order":0,"visits":680,"winrate":0.73,"scoreLead":10.4,"prior":0.26,"pv":["B6","C6","B5"]},{"move":"L6","order":1,"visits":390,"winrate":0.66,"scoreLead":7.9,"prior":0.17,"pv":["L6","K6","L5"]}],"rootInfo":{"visits":1400,"winrate":0.71,"scoreLead":9.6,"currentPlayer":"B"}}
