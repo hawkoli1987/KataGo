@@ -1,0 +1,9 @@
+backend,threads,batch_size,visits,num_positions,board_size
+cuda,64,64,800,10,19
+cuda,96,96,800,10,19
+cuda,128,128,800,10,19
+cuda,192,128,800,10,19
+trt,64,64,800,10,19
+trt,96,96,800,10,19
+trt,128,128,800,10,19
+trt,192,128,800,10,19
