@@ -34,10 +34,10 @@ else
 fi
 
 if [[ "${MATRIX_CSV}" != /* ]]; then
-  MATRIX_CSV="${ROOT_DIR}/${MATRIX_CSV}"
+MATRIX_CSV="${ROOT_DIR}/${MATRIX_CSV}"
 fi
 if [[ "${RESULTS_DIR}" != /* ]]; then
-  RESULTS_DIR="${ROOT_DIR}/${RESULTS_DIR}"
+RESULTS_DIR="${ROOT_DIR}/${RESULTS_DIR}"
 fi
 if [[ -n "${MODEL_PATH}" && "${MODEL_PATH}" != /* ]]; then
   MODEL_PATH="${ROOT_DIR}/${MODEL_PATH}"

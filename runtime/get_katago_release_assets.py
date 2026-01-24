@@ -29,12 +29,12 @@ def main() -> None:
     args = parse_args()
     kinds = [k.strip().lower() for k in args.kinds.split(",") if k.strip()]
     url = f"https://api.github.com/repos/{args.repo}/releases/latest"
-    with urllib.request.urlopen(url) as r:
-        data = json.load(r)
+with urllib.request.urlopen(url) as r:
+    data = json.load(r)
 
     assets = {a["name"]: a["browser_download_url"] for a in data.get("assets", [])}
     print("ASSETS")
-    for name in sorted(assets):
+for name in sorted(assets):
         lower = name.lower()
         if args.include in lower and any(k in lower for k in kinds):
             print(f"{name} {assets[name]}")

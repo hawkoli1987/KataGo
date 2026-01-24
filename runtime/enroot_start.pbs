@@ -1,14 +1,19 @@
 #!/bin/bash
-#PBS -N katago_dev
+#PBS -N go_engine
 #PBS -q AISG_debug
 #PBS -l walltime=24:00:00
 #PBS -l select=1:mem=200gb:ncpus=32:ngpus=1:host=hopper-34
-#PBS -o /dev/null
-#PBS -e /dev/null
+#PBS -j oe
 #PBS -W umask=0007
 
 set -euo pipefail
 
+# Redirect stdout/stderr to log files
+LOG_DIR="/scratch_aisg/SPEC-SF-AISG/yuli/ARF-Training/repos/KataGo/runtime/log"
+mkdir -p "${LOG_DIR}"
+exec >> "${LOG_DIR}/out.log" 2>> "${LOG_DIR}/err.log"
+
+# Configuration
 export SHARED_FS="/scratch/Projects/SPEC-SF-AISG"
 export SQSH_DIR="${SHARED_FS}/sqsh"
 export SQSH_FILE="${SQSH_DIR}/go.sqsh"
@@ -19,6 +24,9 @@ export HOST_LIBCUDA="/lib64/libcuda.so.1"
 export HOST_LIBNVML="/lib64/libnvidia-ml.so.1"
 export LD_LIBRARY_PATH="${HOST_NVIDIA_MOUNT}:${LD_LIBRARY_PATH:-}"
 
+# Server port (default 9000)
+PORT="${ANALYSIS_PORT:-9000}"
+
 mkdir -p "${ENROOT_DATA_PATH}"
 
 if [ ! -f "${SQSH_FILE}" ]; then
@@ -28,24 +36,25 @@ fi
 
 # Create container if it doesn't exist
 if ! enroot list | grep -q "^${CONTAINER_NAME}$"; then
-  enroot create -n "${CONTAINER_NAME}" "${SQSH_FILE}"
+    enroot create -n "${CONTAINER_NAME}" "${SQSH_FILE}"
 fi
 
 # Ensure mount target exists inside the container rootfs
 enroot start --root --rw \
-  --mount="${HOME}:${HOME}" \
-  --mount="${SHARED_FS}:${SHARED_FS}" \
+    --mount="${HOME}:${HOME}" \
+    --mount="${SHARED_FS}:${SHARED_FS}" \
   "${CONTAINER_NAME}" \
   /bin/bash -lc "mkdir -p ${HOST_NVIDIA_MOUNT}"
 
-# Start container directly (assumes you are already in tmux 'go')
-enroot start --root --rw \
-  --env LD_LIBRARY_PATH \
-  --mount="${HOME}:${HOME}" \
-  --mount="${SHARED_FS}:${SHARED_FS}" \
-  --mount="${HOST_LIBCUDA}:${HOST_NVIDIA_MOUNT}/libcuda.so.1" \
-  --mount="${HOST_LIBNVML}:${HOST_NVIDIA_MOUNT}/libnvidia-ml.so.1" \
-  --mount="/usr/bin/nvidia-smi:/usr/bin/nvidia-smi" \
-  "${CONTAINER_NAME}" \
-  /bin/bash
+echo "Starting analysis server on port ${PORT}..."
 
+# Start the analysis server
+enroot start --root --rw \
+    --env LD_LIBRARY_PATH \
+    --mount="${HOME}:${HOME}" \
+    --mount="${SHARED_FS}:${SHARED_FS}" \
+    --mount="${HOST_LIBCUDA}:${HOST_NVIDIA_MOUNT}/libcuda.so.1" \
+    --mount="${HOST_LIBNVML}:${HOST_NVIDIA_MOUNT}/libnvidia-ml.so.1" \
+    --mount="/usr/bin/nvidia-smi:/usr/bin/nvidia-smi" \
+  "${CONTAINER_NAME}" \
+  /bin/bash -lc "cd /scratch/Projects/SPEC-SF-AISG/source_files/KataGo && uvicorn runtime.analysis_server:app --host 0.0.0.0 --port ${PORT}"

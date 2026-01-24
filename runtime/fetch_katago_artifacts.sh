@@ -2,6 +2,7 @@
 set -euo pipefail
 
 BASE=/scratch/Projects/SPEC-SF-AISG/katago
+# Downloads CUDA/TRT KataGo binaries plus a specific model into ${BASE}.
 mkdir -p "${BASE}/bin" "${BASE}/models"
 
 CUDA_URL=https://github.com/lightvector/KataGo/releases/download/v1.16.4/katago-v1.16.4-cuda12.1-cudnn8.9.7-linux-x64.zip
