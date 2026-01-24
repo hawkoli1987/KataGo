@@ -1,0 +1,105 @@
+#!/bin/bash
+
+#PBS -N go_offline
+#PBS -q AISG_debug
+#PBS -l select=2:ngpus=8:ncpus=100:mem=1500gb
+#PBS -l walltime=24:00:00
+#PBS -o /dev/null
+#PBS -e /dev/null
+
+set -euo pipefail
+
+module load nccl
+module load openmpi4/gcc/4.1.5
+module load singularity
+
+# ============================================================================
+# Job metadata (PBS-specific, must be set here)
+# ============================================================================
+export JOB_WORK_DIR="${PBS_O_WORKDIR}"
+export JOB_ID="$(echo "${PBS_JOBID}" | cut -d'.' -f1)"
+export JOB_NAME="${PBS_JOBNAME}"
+SCRIPT_DIR="${JOB_WORK_DIR}"
+
+# ============================================================================
+# Filesystem paths (needed for bind mounts and log directory)
+# ============================================================================
+export SHARED_FS="/scratch_aisg/SPEC-SF-AISG"
+export SHARED_FS2="/scratch/Projects/SPEC-SF-AISG"
+
+# ============================================================================
+# Algorithm: DAPO for KataGo winrate training
+# ============================================================================
+export ALGO="dapo"
+
+# ============================================================================
+# Log directory (must be created before container launch)
+# ============================================================================
+export LOG_DIR="${SHARED_FS}/log/verl/${SWEEP_NAME:-}/${JOB_NAME}/${JOB_ID}"
+
+umask 0007
+mkdir -p "${LOG_DIR}/nccl"
+mkdir -p "${LOG_DIR}/env"
+
+# Send all stdout/stderr to LOG_DIR
+exec > >(tee -a "${LOG_DIR}/pbs.out") 2> >(tee -a "${LOG_DIR}/pbs.err" >&2)
+
+cd "${JOB_WORK_DIR}"
+
+# Save host env for debugging
+printenv | sort > "${LOG_DIR}/env/EnvVar_hostOS.log"
+
+# ============================================================================
+# Cluster topology
+# ============================================================================
+readarray -t host_array < <(sort -u "${PBS_NODEFILE}")
+NUM_NODES=${#host_array[@]}
+MASTER_ADDR="${host_array[0]}"
+HOSTFILE_UNIQUE="${LOG_DIR}/hostfile"
+printf "%s\n" "${host_array[@]}" > "${HOSTFILE_UNIQUE}"
+
+GPUS_PER_NODE="$(nvidia-smi -L | wc -l)"
+WORLD_SIZE=$((GPUS_PER_NODE * NUM_NODES))
+MASTER_PORT=$((10000 + RANDOM % 10000))
+
+# ============================================================================
+# Container setup
+# ============================================================================
+SIF_PATH="${SHARED_FS}/sif/verl-vllm012.sif"
+
+# Copy scripts to log dir for reproducibility
+cp "${SCRIPT_DIR}/train.pbs" "${LOG_DIR}/train.pbs"
+cp "${SCRIPT_DIR}/train.sh" "${LOG_DIR}/train.sh"
+cp "${SCRIPT_DIR}/reward.py" "${LOG_DIR}/reward.py"
+chmod +rx "${LOG_DIR}"/*
+
+BASH_SCRIPT="${LOG_DIR}/train.sh"
+
+# ============================================================================
+# Launch command
+# ============================================================================
+launch_cmd="singularity exec --nv \
+    --bind ${SHARED_FS}:${SHARED_FS} \
+    --bind ${SHARED_FS2}:${SHARED_FS2} \
+    --bind ${HOME}:${HOME} \
+    ${SIF_PATH} \
+    bash ${BASH_SCRIPT} \
+        ${GPUS_PER_NODE} \
+        ${WORLD_SIZE} \
+        ${NUM_NODES} \
+        ${MASTER_ADDR} \
+        ${MASTER_PORT} \
+        \${OMPI_COMM_WORLD_RANK}"
+
+# Only pass essential env vars that are PBS-specific
+# All other env vars are defined directly in train.sh
+mpirun -np "${NUM_NODES}" \
+    --hostfile "${HOSTFILE_UNIQUE}" \
+    --map-by ppr:1:node \
+    -x LOG_DIR \
+    -x JOB_ID \
+    -x JOB_NAME \
+    -x SHARED_FS \
+    -x SHARED_FS2 \
+    -x ALGO \
+    bash -c "${launch_cmd}"
