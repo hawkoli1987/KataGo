@@ -160,9 +160,9 @@ def compute_score(
         except ValueError:
             pass
     
-    # Source 2: From extra_info.winrate
+    # Source 2: From extra_info.root_winrate (or legacy 'winrate')
     if ground_truth_winrate is None and extra_info:
-        winrate = extra_info.get("winrate")
+        winrate = extra_info.get("root_winrate") or extra_info.get("winrate")
         if winrate is not None:
             try:
                 ground_truth_winrate = float(winrate)
