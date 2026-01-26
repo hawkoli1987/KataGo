@@ -5,14 +5,17 @@
 #PBS -l select=1:mem=200gb:ncpus=32:ngpus=1:host=hopper-34
 #PBS -j oe
 #PBS -W umask=0007
-#PBS -o /scratch_aisg/SPEC-SF-AISG/yuli/ARF-Training/repos/KataGo/runtime/log/
 
 set -euo pipefail
 
-# Redirect stdout/stderr to log files
+# Create log directory with job ID and redirect all output
 LOG_DIR="/scratch_aisg/SPEC-SF-AISG/yuli/ARF-Training/repos/KataGo/runtime/log"
-mkdir -p "${LOG_DIR}"
-exec >> "${LOG_DIR}/out.log" 2>> "${LOG_DIR}/err.log"
+mkdir -p "${LOG_DIR}/${PBS_JOBID}"
+exec >> "${LOG_DIR}/${PBS_JOBID}/pbs.log" 2>&1
+
+echo "=== Job started at $(date) ==="
+echo "PBS_JOBID: ${PBS_JOBID}"
+echo "Hostname: $(hostname)"
 
 # Configuration
 export SHARED_FS="/scratch/Projects/SPEC-SF-AISG"
@@ -22,55 +25,46 @@ export CONTAINER_NAME="katago_dev"
 export ENROOT_DATA_PATH="${SHARED_FS}/.enroot/data"
 export HOST_NVIDIA_MOUNT="/opt/host-nvidia"
 
-# Server port (default 9100, matching config.yaml)
-PORT="${ANALYSIS_PORT:-9100}"
+# CUDA driver libraries - must be mounted from host (cannot be in container)
+# These are tied to the kernel driver version on the host
+HOST_LIBCUDA="/lib64/libcuda.so.1"
+HOST_LIBNVML="/lib64/libnvidia-ml.so.1"
+
+# Server port (default 9200, matching config.yaml)
+PORT="${ANALYSIS_PORT:-9200}"
 
 mkdir -p "${ENROOT_DATA_PATH}"
 
+# Verify required files exist
+echo "Checking required files..."
 if [ ! -f "${SQSH_FILE}" ]; then
-  echo "Missing ${SQSH_FILE}. Run runtime/enroot_create.pbs first." >&2
-  exit 1
-fi
-
-# Find CUDA libraries dynamically (different paths on different nodes)
-find_cuda_lib() {
-    local lib_name="$1"
-    local search_paths=(
-        "/lib64/${lib_name}"
-        "/usr/lib64/${lib_name}"
-        "/usr/lib/x86_64-linux-gnu/${lib_name}"
-        "/opt/nvidia/lib64/${lib_name}"
-    )
-    for path in "${search_paths[@]}"; do
-        if [ -f "$path" ]; then
-            echo "$path"
-            return 0
-        fi
-    done
-    # Try ldconfig as fallback
-    ldconfig -p 2>/dev/null | grep -m1 "${lib_name}" | awk '{print $NF}' | head -1
-}
-
-HOST_LIBCUDA=$(find_cuda_lib "libcuda.so.1")
-HOST_LIBNVML=$(find_cuda_lib "libnvidia-ml.so.1")
-
-echo "Found libcuda: ${HOST_LIBCUDA:-NOT FOUND}"
-echo "Found libnvml: ${HOST_LIBNVML:-NOT FOUND}"
-
-if [ -z "${HOST_LIBCUDA}" ]; then
-    echo "ERROR: Could not find libcuda.so.1 on this node" >&2
-    echo "Searched: /lib64, /usr/lib64, /usr/lib/x86_64-linux-gnu, /opt/nvidia/lib64" >&2
+    echo "ERROR: Missing ${SQSH_FILE}. Run runtime/enroot_create.pbs first." >&2
     exit 1
 fi
+
+if [ ! -f "${HOST_LIBCUDA}" ]; then
+    echo "ERROR: Missing ${HOST_LIBCUDA} on host" >&2
+    exit 1
+fi
+
+if [ ! -f "${HOST_LIBNVML}" ]; then
+    echo "WARNING: Missing ${HOST_LIBNVML} on host (nvidia-smi may not work)"
+fi
+
+echo "SQSH file: ${SQSH_FILE} [OK]"
+echo "libcuda: ${HOST_LIBCUDA} [OK]"
+echo "libnvml: ${HOST_LIBNVML} [$([ -f ${HOST_LIBNVML} ] && echo OK || echo MISSING)]"
 
 export LD_LIBRARY_PATH="${HOST_NVIDIA_MOUNT}:${LD_LIBRARY_PATH:-}"
 
 # Create container if it doesn't exist
 if ! enroot list | grep -q "^${CONTAINER_NAME}$"; then
+    echo "Creating container ${CONTAINER_NAME}..."
     enroot create -n "${CONTAINER_NAME}" "${SQSH_FILE}"
 fi
 
 # Ensure mount target exists inside the container rootfs
+echo "Preparing container mount points..."
 enroot start --root --rw \
     --mount="${HOME}:${HOME}" \
     --mount="${SHARED_FS}:${SHARED_FS}" \
@@ -79,22 +73,13 @@ enroot start --root --rw \
 
 echo "Starting analysis server on port ${PORT}..."
 
-# Build mount options dynamically
-MOUNT_OPTS=(
-    "--mount=${HOME}:${HOME}"
-    "--mount=${SHARED_FS}:${SHARED_FS}"
-    "--mount=${HOST_LIBCUDA}:${HOST_NVIDIA_MOUNT}/libcuda.so.1"
-)
-
-# Add optional mounts if files exist
-[ -n "${HOST_LIBNVML}" ] && [ -f "${HOST_LIBNVML}" ] && \
-    MOUNT_OPTS+=("--mount=${HOST_LIBNVML}:${HOST_NVIDIA_MOUNT}/libnvidia-ml.so.1")
-[ -f "/usr/bin/nvidia-smi" ] && \
-    MOUNT_OPTS+=("--mount=/usr/bin/nvidia-smi:/usr/bin/nvidia-smi")
-
 # Start the analysis server
 enroot start --root --rw \
     --env LD_LIBRARY_PATH \
-    "${MOUNT_OPTS[@]}" \
+    --mount="${HOME}:${HOME}" \
+    --mount="${SHARED_FS}:${SHARED_FS}" \
+    --mount="${HOST_LIBCUDA}:${HOST_NVIDIA_MOUNT}/libcuda.so.1" \
+    --mount="${HOST_LIBNVML}:${HOST_NVIDIA_MOUNT}/libnvidia-ml.so.1" \
+    --mount="/usr/bin/nvidia-smi:/usr/bin/nvidia-smi" \
   "${CONTAINER_NAME}" \
   /bin/bash -lc "cd /scratch/Projects/SPEC-SF-AISG/source_files/KataGo && uvicorn runtime.analysis_server:app --host 0.0.0.0 --port ${PORT}"

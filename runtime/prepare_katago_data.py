@@ -51,26 +51,22 @@ Example output: {"winrate": 0.56}"""
 class GameProperties:
     """Immutable game properties for grouping.
     
-    rules: Short canonical name (japanese, tromp-taylor, etc.) for folder naming
-    rules_raw: Full KataGo rule string (e.g., koPOSITIONALscoreTERRITORYtaxSEKIsui0)
+    rules: Full KataGo rule string (e.g., koPOSITIONALscoreTERRITORYtaxSEKIsui0)
     """
     board_size: int
-    rules: str
-    rules_raw: str
+    rules: str  # Full KataGo rule string
     komi: float
     
     def to_dirname(self) -> str:
-        """Use short rule name for folder naming."""
+        """Use full rule string for folder naming."""
         return f"{self.board_size}x{self.board_size}_{self.rules}_{self.komi}"
     
     def __hash__(self):
-        # Group by short rules for folder output
         return hash((self.board_size, self.rules, self.komi))
     
     def __eq__(self, other):
         if not isinstance(other, GameProperties):
             return False
-        # Group by short rules (games with same short rules go in same folder)
         return (self.board_size == other.board_size and 
                 self.rules == other.rules and 
                 self.komi == other.komi)
@@ -178,34 +174,6 @@ def sgfmill_coord_to_katago(row: int, col: int, board_size: int) -> str:
     return f"{col_char}{katago_row}"
 
 
-def parse_rules_string(rules_raw: str) -> str:
-    """
-    Parse KataGo rules string to canonical form.
-    
-    Raises AssertionError if format is unrecognized.
-    """
-    rules_lower = rules_raw.lower()
-    
-    if 'chinese' in rules_lower:
-        return 'chinese'
-    elif 'japanese' in rules_lower:
-        return 'japanese'
-    elif 'korean' in rules_lower:
-        return 'korean'
-    elif 'aga' in rules_lower:
-        return 'aga'
-    elif 'tromp' in rules_lower or 'taylor' in rules_lower:
-        return 'tromp-taylor'
-    elif 'nz' in rules_lower or 'new zealand' in rules_lower:
-        return 'new-zealand'
-    elif 'scorearea' in rules_lower:
-        return 'tromp-taylor'
-    elif 'scoreterritory' in rules_lower:
-        return 'japanese'
-    else:
-        assert False, f"Unknown rules format: {rules_raw}"
-
-
 def is_rectangular_board(sgf_content: bytes) -> bool:
     """
     Check if SGF has rectangular board (e.g., SZ[14:13]).
@@ -240,16 +208,14 @@ def parse_sgf_file(sgf_path: Path) -> Tuple[List[PositionEval], GameProperties]:
     assert komi_val is not None, "Missing KM (komi) property"
     komi = float(komi_val)
     
-    # Extract rules - REQUIRED
-    rules_raw_val = root.get('RU')
-    assert rules_raw_val is not None, "Missing RU (rules) property"
-    rules_raw_str = str(rules_raw_val)
-    rules = parse_rules_string(rules_raw_str)
+    # Extract rules - REQUIRED (use full KataGo rule string)
+    rules_val = root.get('RU')
+    assert rules_val is not None, "Missing RU (rules) property"
+    rules = str(rules_val)
     
     game_props = GameProperties(
         board_size=board_size,
         rules=rules,
-        rules_raw=rules_raw_str,
         komi=komi
     )
     
@@ -321,7 +287,7 @@ def create_verl_record(
     # Position data for LLM prompt (uses moves for ko handling)
     position_data = {
         'moves': position.moves,
-        'rules': game_props.rules_raw,  # Full rule string for KataGo compatibility
+        'rules': game_props.rules,  # Full KataGo rule string
         'komi': game_props.komi,
         'boardXSize': game_props.board_size,
         'boardYSize': game_props.board_size,
@@ -336,7 +302,7 @@ def create_verl_record(
     katago_query = {
         'id': position_id,
         'moves': position.moves,
-        'rules': game_props.rules_raw,  # Full rule string for exact match
+        'rules': game_props.rules,  # Full KataGo rule string
         'komi': game_props.komi,
         'boardXSize': game_props.board_size,
         'boardYSize': game_props.board_size,
@@ -373,8 +339,7 @@ def create_verl_record(
             'score_lead_black': position.score_lead,
             'visits': position.visits,
             'weight': position.weight,
-            'rules': game_props.rules,  # Short rule name
-            'rules_raw': game_props.rules_raw,  # Full KataGo rule string
+            'rules': game_props.rules,  # Full KataGo rule string
             'katago_query': json.dumps(katago_query),
         }
     }

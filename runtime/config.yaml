@@ -1,4 +1,4 @@
-port: 9100
+port: 9200
 
 # Reserved for later steps
 katago:

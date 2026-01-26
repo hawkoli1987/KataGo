@@ -94,4 +94,4 @@ cpp/build.ninja
 cpp/KataGoSwift.*
 cpp/include/KataGoSwift/KataGoSwift-swift.h
 
-runtime/assets
+runtime/assets*.o*
