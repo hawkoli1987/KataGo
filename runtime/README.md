@@ -59,3 +59,8 @@
 - Sample inputs/outputs:
   Inputs: `runtime/assets/analysis/inputs/*.jsonl`
   Outputs: `runtime/assets/analysis/outputs/*.jsonl`
+
+
+1. how was this created?@repos/KataGo/runtime/go_engine.o165134, can we move it into the log_dir automatically during job launch?
+2.  could you help me create a enroot_start_interactive.shbased on @repos/KataGo/runtime/enroot_start.pbs, so it will only launch a job with the same resource inside the same enroot container, but allow us to run commands interactively inside the container. No need to start the katago analysis engine server
+3. you should test the step 2 implementation inside the tmux session 'go'

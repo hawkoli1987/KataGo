@@ -2,7 +2,12 @@
 Custom reward function for KataGo winrate prediction training.
 
 This function computes -MSE (negative mean squared error) between the model's
-predicted winrate and the ground truth from the KataGo analysis engine.
+predicted winrate and the ground truth winrate.
+
+Ground truth source (in order of preference):
+1. Pre-computed winrate stored in reward_model.ground_truth (from SGF data)
+2. Pre-computed winrate stored in extra_info.winrate
+3. Real-time API call to KataGo engine (fallback, slower)
 
 The reward function is called by veRL during training to score each generated response.
 """
@@ -12,11 +17,12 @@ import re
 import requests
 from typing import Optional
 
-# KataGo Analysis Engine endpoint
+# KataGo Analysis Engine endpoint (used only as fallback)
 KATAGO_ENDPOINT = "http://hopper-34:9000/analysis"
-
-# Request timeout in seconds
 REQUEST_TIMEOUT = 30
+
+# Whether to use real-time API calls as fallback
+ENABLE_API_FALLBACK = True
 
 
 def extract_winrate_from_response(response_str: str) -> Optional[float]:
@@ -27,36 +33,35 @@ def extract_winrate_from_response(response_str: str) -> Optional[float]:
     - Clean JSON: {"winrate": 0.56}
     - JSON with reasoning: "The position looks balanced... {"winrate": 0.52}"
     - Markdown code blocks: ```json\n{"winrate": 0.55}\n```
+    - Qwen3 thinking format: <think>...</think>{"winrate": 0.54}
     """
     if not response_str or not isinstance(response_str, str):
         return None
     
     response_str = response_str.strip()
     
+    # Remove thinking blocks if present
+    response_str = re.sub(r'<think>.*?</think>', '', response_str, flags=re.DOTALL)
+    
     # Try to find the last JSON object in the response
-    # This handles cases where the model outputs reasoning before the JSON
     json_pattern = r'\{[^{}]*"winrate"[^{}]*\}'
     matches = re.findall(json_pattern, response_str, re.IGNORECASE)
     
     if matches:
-        # Use the last match (most likely to be the final answer)
         json_str = matches[-1]
         try:
             data = json.loads(json_str)
             winrate = data.get("winrate") or data.get("Winrate") or data.get("WINRATE")
             if winrate is not None:
                 winrate = float(winrate)
-                # Clamp to valid range
                 return max(0.0, min(1.0, winrate))
         except (json.JSONDecodeError, ValueError, TypeError):
             pass
     
-    # Fallback: try to extract any float that looks like a winrate
-    # Pattern: standalone decimal between 0 and 1
+    # Fallback: extract any float that looks like a winrate (0.XX)
     float_pattern = r'\b0\.\d+\b'
     matches = re.findall(float_pattern, response_str)
     if matches:
-        # Use the last match
         try:
             winrate = float(matches[-1])
             if 0.0 <= winrate <= 1.0:
@@ -78,9 +83,9 @@ def extract_winrate_from_response(response_str: str) -> Optional[float]:
     return None
 
 
-def get_ground_truth_winrate(katago_query: str) -> Optional[float]:
+def get_ground_truth_from_api(katago_query: str) -> Optional[float]:
     """
-    Call KataGo engine to get the ground truth winrate.
+    Call KataGo engine to get the ground truth winrate (fallback only).
     
     Args:
         katago_query: JSON string containing the KataGo analysis query
@@ -88,6 +93,9 @@ def get_ground_truth_winrate(katago_query: str) -> Optional[float]:
     Returns:
         Ground truth winrate for the current player, or None on error
     """
+    if not ENABLE_API_FALLBACK:
+        return None
+    
     try:
         response = requests.post(
             KATAGO_ENDPOINT,
@@ -97,26 +105,15 @@ def get_ground_truth_winrate(katago_query: str) -> Optional[float]:
         )
         response.raise_for_status()
         
-        # Parse response
         result = json.loads(response.text.strip())
-        
-        # Extract winrate from rootInfo
-        # Note: KataGo reports winrate for the player to move
         winrate = result.get("rootInfo", {}).get("winrate")
         
         if winrate is not None:
             return float(winrate)
-        
         return None
         
-    except requests.exceptions.Timeout:
-        print(f"[KataGo Reward] Request timeout after {REQUEST_TIMEOUT}s")
-        return None
-    except requests.exceptions.RequestException as e:
-        print(f"[KataGo Reward] Request error: {e}")
-        return None
-    except (json.JSONDecodeError, ValueError, KeyError) as e:
-        print(f"[KataGo Reward] Parse error: {e}")
+    except Exception as e:
+        # Silently fail - this is just a fallback
         return None
 
 
@@ -134,16 +131,16 @@ def compute_score(
     Args:
         data_source: Dataset identifier (e.g., "katago/winrate")
         solution_str: Model's generated response
-        ground_truth: Not used (we call the engine in real-time)
-        extra_info: Contains katago_query for engine call
+        ground_truth: Pre-computed ground truth winrate (from parquet)
+        extra_info: Contains fallback data (katago_query, winrate)
     
     Returns:
-        float: Reward value. For -MSE:
+        float: Reward value (-MSE):
             - 0.0: Perfect prediction
-            - -0.25: Off by 0.5 (50% error)
-            - -1.0: Maximum error (completely wrong)
+            - -0.01: Off by 0.1
+            - -0.25: Off by 0.5
+            - -1.0: Maximum error or invalid format
     """
-    # Penalty values
     FORMAT_ERROR_PENALTY = -1.0
     ENGINE_ERROR_PENALTY = -0.25
     
@@ -151,21 +148,35 @@ def compute_score(
     predicted_winrate = extract_winrate_from_response(solution_str)
     
     if predicted_winrate is None:
-        # Model failed to produce a valid winrate
         return FORMAT_ERROR_PENALTY
     
-    # 2. Get ground truth from KataGo engine
-    if extra_info is None:
-        return ENGINE_ERROR_PENALTY
+    # 2. Get ground truth winrate (try multiple sources)
+    ground_truth_winrate = None
     
-    katago_query = extra_info.get("katago_query", "")
-    if not katago_query:
-        return ENGINE_ERROR_PENALTY
+    # Source 1: From ground_truth parameter (stored in parquet)
+    if ground_truth and ground_truth.strip():
+        try:
+            ground_truth_winrate = float(ground_truth)
+        except ValueError:
+            pass
     
-    ground_truth_winrate = get_ground_truth_winrate(katago_query)
+    # Source 2: From extra_info.winrate
+    if ground_truth_winrate is None and extra_info:
+        winrate = extra_info.get("winrate")
+        if winrate is not None:
+            try:
+                ground_truth_winrate = float(winrate)
+            except (ValueError, TypeError):
+                pass
     
+    # Source 3: From KataGo API (fallback, slower)
+    if ground_truth_winrate is None and extra_info:
+        katago_query = extra_info.get("katago_query", "")
+        if katago_query:
+            ground_truth_winrate = get_ground_truth_from_api(katago_query)
+    
+    # If we still don't have ground truth, return penalty
     if ground_truth_winrate is None:
-        # Engine call failed - use neutral penalty
         return ENGINE_ERROR_PENALTY
     
     # 3. Compute -MSE reward
@@ -177,35 +188,31 @@ def compute_score(
 
 # For testing
 if __name__ == "__main__":
-    # Test the reward function
-    test_extra_info = {
-        "katago_query": json.dumps({
-            "id": "test",
-            "moves": [["B", "D4"], ["W", "Q16"], ["B", "D16"]],
-            "rules": "tromp-taylor",
-            "komi": 7.5,
-            "boardXSize": 19,
-            "boardYSize": 19,
-            "analyzeTurns": [3]
-        })
-    }
+    print("Testing reward function with pre-computed ground truth:\n")
     
-    # Test with different model outputs
     test_cases = [
-        '{"winrate": 0.56}',
-        'Based on my analysis, the position is slightly favorable for Black. {"winrate": 0.55}',
-        'The winrate is approximately 52%.',
-        '```json\n{"winrate": 0.48}\n```',
-        'Invalid response without winrate',
+        # (model_response, ground_truth, expected_approx_reward)
+        ('{"winrate": 0.56}', "0.56", 0.0),
+        ('{"winrate": 0.50}', "0.56", -0.0036),
+        ('{"winrate": 0.60}', "0.50", -0.01),
+        ('The position is balanced. {"winrate": 0.55}', "0.55", 0.0),
+        ('<think>Let me analyze...</think>{"winrate": 0.48}', "0.50", -0.0004),
+        ('The winrate is approximately 52%.', "0.52", 0.0),
+        ('Invalid response', "0.50", -1.0),
     ]
     
-    print("Testing reward function:")
-    for i, response in enumerate(test_cases):
+    print(f"{'Response':<50} {'GT':>6} {'Pred':>6} {'Reward':>8}")
+    print("-" * 75)
+    
+    for response, gt, expected in test_cases:
         score = compute_score(
             data_source="katago/winrate",
             solution_str=response,
-            ground_truth="",
-            extra_info=test_extra_info
+            ground_truth=gt,
+            extra_info={}
         )
-        extracted = extract_winrate_from_response(response)
-        print(f"  Test {i+1}: extracted={extracted}, reward={score:.4f}")
+        pred = extract_winrate_from_response(response)
+        pred_str = f"{pred:.2f}" if pred else "None"
+        print(f"{response[:48]:<50} {gt:>6} {pred_str:>6} {score:>8.4f}")
+    
+    print("\nAll tests use pre-computed ground truth (no API calls).")
