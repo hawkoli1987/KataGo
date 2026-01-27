@@ -95,3 +95,12 @@ cpp/KataGoSwift.*
 cpp/include/KataGoSwift/KataGoSwift-swift.h
 
 runtime/assets*.o*
+
+# Eval outputs and data folder (large files)
+data
+assets/
+# Large model files (keep manifest.json)
+*.bin.gz
+*.pt
+*.ckpt
+!assets/models/manifest.json

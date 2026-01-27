@@ -1,1 +1,0 @@
-{"id":"midgame_19","isDuringSearch":false,"turnNumber":30,"moveInfos":[{"move":"Q5","order":0,"visits":834,"winrate":0.57,"scoreLead":3.2,"prior":0.21,"pv":["Q5","R5","Q6"]},{"move":"D17","order":1,"visits":521,"winrate":0.54,"scoreLead":1.8,"prior":0.14,"pv":["D17","C17","C16"]}],"rootInfo":{"visits":2000,"winrate":0.56,"scoreLead":2.6,"currentPlayer":"B"}}

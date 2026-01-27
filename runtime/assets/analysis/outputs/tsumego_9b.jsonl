@@ -1,1 +1,0 @@
-{"id":"tsumego_9b","isDuringSearch":false,"turnNumber":0,"moveInfos":[{"move":"F8","order":0,"visits":540,"winrate":0.58,"scoreLead":2.1,"prior":0.22,"pv":["F8","G8","H8"]},{"move":"E8","order":1,"visits":410,"winrate":0.55,"scoreLead":1.2,"prior":0.19,"pv":["E8","F8","G8"]}],"rootInfo":{"visits":1100,"winrate":0.57,"scoreLead":1.8,"currentPlayer":"W"}}

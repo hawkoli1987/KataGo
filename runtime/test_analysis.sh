@@ -3,8 +3,8 @@ set -euo pipefail
 
 ROOT_DIR="/scratch/Projects/SPEC-SF-AISG/source_files/KataGo"
 
-INPUT_PATH="${1:-${ROOT_DIR}/runtime/assets/analysis/inputs/lategame_19.jsonl}"
-OUTPUT_PATH="${2:-${ROOT_DIR}/runtime/assets/analysis/outputs/lategame_19.jsonl}"
+INPUT_PATH="${1:-${ROOT_DIR}/assets/analysis/inputs/lategame_19.jsonl}"
+OUTPUT_PATH="${2:-${ROOT_DIR}/assets/analysis/outputs/lategame_19.jsonl}"
 HOST="${3:-hopper-34:9200}"
 
 mkdir -p "$(dirname "${OUTPUT_PATH}")"
