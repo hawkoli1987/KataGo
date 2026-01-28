@@ -34,7 +34,7 @@ from pydantic import BaseModel
 
 
 ROOT_DIR = Path(__file__).parent.parent.resolve()
-CONFIG_PATH = ROOT_DIR / "runtime" / "config.yaml"
+CONFIG_PATH = ROOT_DIR / "configs" / "config.yaml"
 DEFAULT_ANALYSIS_CONFIG = ROOT_DIR / "assets" / "bin" / "katago-trt" / "analysis_example.cfg"
 STDERR_LOG = ROOT_DIR / "runtime" / "analysis_server.stderr.log"
 ANALYSIS_TIMEOUT_SEC = 120
@@ -382,5 +382,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     cfg = load_config()
-    port = args.port or cfg.get("port", 9200)
+    server_cfg = cfg.get("server", {})
+    port = args.port or server_cfg.get("port", 9200)
     uvicorn.run(app, host=args.host, port=port, log_level="warning")

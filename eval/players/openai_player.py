@@ -1,6 +1,7 @@
 """OpenAI-compatible LLM player using async HTTP.
 
 Supports vLLM and other OpenAI-compatible API endpoints.
+Prompts are loaded from configs/prompts.json.
 """
 
 import json
@@ -14,25 +15,26 @@ from pydantic import BaseModel, ValidationError
 from eval.players.base import Player, validate_gtp_move
 
 
-# Default prompt template
-DEFAULT_PROMPT_TEMPLATE = """You are playing Go as {color_name}. The board is 19x19.
+# Path to prompts configuration
+PROMPTS_PATH = Path(__file__).parent.parent.parent / "configs" / "prompts.json"
 
-Rules: {rules}
-Komi: {komi}
 
-Move history: {history_str}
+def load_prompts() -> dict:
+    """Load prompts from configs/prompts.json."""
+    assert PROMPTS_PATH.exists(), f"Prompts file not found: {PROMPTS_PATH}"
+    with open(PROMPTS_PATH, "r") as f:
+        return json.load(f)
 
-Your turn. Analyze the position and provide your move.
 
-You MUST respond with a JSON object in this exact format:
-{{"reasoning": "<your_analysis>", "move": "<your_move>"}}
-
-Where <your_move> is in GTP coordinate format:
-- Column letter A-T (skipping I)
-- Row number 1-19
-- Examples: "D4", "Q16", "C3", "pass", "resign"
-
-Respond with ONLY the JSON object."""
+def get_go_move_prompt() -> tuple[str, str]:
+    """Get the Go move prompt template and system message.
+    
+    Returns:
+        (system_message, template)
+    """
+    prompts = load_prompts()
+    go_move = prompts["go_move"]
+    return go_move["system"], go_move["template"]
 
 
 class LLMResponse(BaseModel):
@@ -45,6 +47,7 @@ class OpenAIPlayer(Player):
     """LLM player using OpenAI-compatible API (async HTTP).
     
     Works with vLLM, OpenAI, and other compatible endpoints.
+    Prompts are loaded from configs/prompts.json.
     """
     
     def __init__(
@@ -54,7 +57,6 @@ class OpenAIPlayer(Player):
         api_key: Optional[str] = None,
         temperature: float = 0.1,
         max_tokens: int = 1024,
-        prompt_template: Optional[str] = None,
         name: Optional[str] = None
     ):
         """Initialize OpenAI player.
@@ -65,7 +67,6 @@ class OpenAIPlayer(Player):
             api_key: API key (optional for local vLLM)
             temperature: Sampling temperature
             max_tokens: Max tokens to generate
-            prompt_template: Custom prompt template
             name: Player name
         """
         self.api_base = api_base.rstrip("/")
@@ -73,7 +74,9 @@ class OpenAIPlayer(Player):
         self.api_key = api_key or "dummy"
         self.temperature = temperature
         self.max_tokens = max_tokens
-        self.prompt_template = prompt_template or DEFAULT_PROMPT_TEMPLATE
+        
+        # Load prompts from config
+        self._system_message, self._prompt_template = get_go_move_prompt()
         
         self._session: Optional[aiohttp.ClientSession] = None
         self._ply = 0
@@ -146,7 +149,7 @@ class OpenAIPlayer(Player):
         color_name = "Black" if color == "B" else "White"
         history_str = ", ".join(f"{c}:{m}" for c, m in move_history) if move_history else "none"
         
-        prompt = self.prompt_template.format(
+        prompt = self._prompt_template.format(
             color_name=color_name,
             rules=rules,
             komi=komi,
@@ -205,7 +208,7 @@ class OpenAIPlayer(Player):
         payload = {
             "model": self.model,
             "messages": [
-                {"role": "system", "content": "You are an expert Go player."},
+                {"role": "system", "content": self._system_message},
                 {"role": "user", "content": prompt}
             ],
             "temperature": self.temperature,

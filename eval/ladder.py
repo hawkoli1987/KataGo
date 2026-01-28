@@ -2,17 +2,38 @@
 
 Implements the ladder-style competition pipeline with Elo rating.
 Games within a level run in parallel using async I/O.
+
+Architecture:
+- Candidate and reference servers run as separate PBS jobs
+- This script connects to them via HTTP endpoints
+- Reference server is restarted with new model between levels
 """
 
 import asyncio
 import json
+import subprocess
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
+import yaml
+
 from eval.players.base import Player
 from eval.players.katago_player import KataGoPlayer
 from eval.game import play_single_game, generate_game_variations, GameResult
+
+
+# Repository root
+REPO_ROOT = Path(__file__).parent.parent.resolve()
+CONFIG_PATH = REPO_ROOT / "configs" / "config.yaml"
+MANAGE_SCRIPT = REPO_ROOT / "runtime" / "manage_servers.sh"
+
+
+def load_config() -> dict:
+    """Load configuration from config.yaml."""
+    with open(CONFIG_PATH) as f:
+        return yaml.safe_load(f)
 
 
 def compute_elo_update(
@@ -27,6 +48,76 @@ def compute_elo_update(
     return candidate_elo + k_factor * (actual - expected)
 
 
+def restart_reference_server(model_path: str, timeout: int = 120) -> str:
+    """Restart the reference KataGo server with a new model.
+    
+    Args:
+        model_path: Path to the model weights
+        timeout: Timeout in seconds to wait for server to be ready
+        
+    Returns:
+        Endpoint URL for the reference server
+    """
+    print(f"  Restarting reference server with model: {model_path}")
+    
+    # Restart reference server with new model
+    result = subprocess.run(
+        [str(MANAGE_SCRIPT), "restart", "reference", "--model", model_path],
+        capture_output=True,
+        text=True,
+        cwd=str(REPO_ROOT)
+    )
+    
+    if result.returncode != 0:
+        raise RuntimeError(f"Failed to restart reference server: {result.stderr}")
+    
+    # Wait for server to be ready and get endpoint
+    result = subprocess.run(
+        [str(MANAGE_SCRIPT), "wait", "reference", str(timeout)],
+        capture_output=True,
+        text=True,
+        cwd=str(REPO_ROOT)
+    )
+    
+    if result.returncode != 0:
+        raise RuntimeError(f"Reference server not ready: {result.stderr}")
+    
+    # Parse endpoint from output (last line should be the URL)
+    # Filter for lines that look like URLs
+    lines = result.stdout.strip().split("\n")
+    endpoint = None
+    for line in reversed(lines):
+        line = line.strip()
+        if line.startswith("http://") or line.startswith("https://"):
+            endpoint = line
+            break
+    
+    if not endpoint:
+        raise RuntimeError(f"Could not parse endpoint from output: {result.stdout}")
+    
+    print(f"  Reference server ready at: {endpoint}")
+    
+    return endpoint
+
+
+def get_server_endpoints() -> dict:
+    """Get current server endpoints from manage_servers.sh."""
+    result = subprocess.run(
+        [str(MANAGE_SCRIPT), "endpoints"],
+        capture_output=True,
+        text=True,
+        cwd=str(REPO_ROOT)
+    )
+    
+    endpoints = {}
+    for line in result.stdout.strip().split("\n"):
+        if "=" in line:
+            key, value = line.split("=", 1)
+            endpoints[key.lower()] = value
+    
+    return endpoints
+
+
 async def play_game_with_id(
     game_id: int,
     candidate: Player,
@@ -35,6 +126,7 @@ async def play_game_with_id(
     rule_string: str,
     komi: float,
     candidate_color: str,
+    max_moves: int = 500,
     verbose: bool = False
 ) -> GameResult:
     """Play a single game (wrapper for parallel execution)."""
@@ -48,6 +140,7 @@ async def play_game_with_id(
         rule_string=rule_string,
         komi=komi,
         candidate_color=candidate_color,
+        max_moves=max_moves,
         verbose=verbose
     )
 
@@ -57,6 +150,7 @@ async def run_level_games(
     reference: Player,
     variations: List,
     max_parallel: int = 4,
+    max_moves: int = 500,
     verbose: bool = False
 ) -> List[GameResult]:
     """Run all games for a level in parallel.
@@ -66,6 +160,7 @@ async def run_level_games(
         reference: Reference player
         variations: List of (rule_name, rule_string, komi, candidate_color)
         max_parallel: Max concurrent games
+        max_moves: Maximum moves per game
         verbose: Print verbose output
     
     Returns:
@@ -88,6 +183,7 @@ async def run_level_games(
                 rule_string=rule_string,
                 komi=komi,
                 candidate_color=candidate_color,
+                max_moves=max_moves,
                 verbose=verbose
             )
             
@@ -117,37 +213,59 @@ async def run_level_games(
 
 async def run_ladder_evaluation_async(
     candidate: Player,
-    manifest_path: Path,
-    output_dir: Path,
-    model_name: str,
-    games_per_level: int = 48,
-    promotion_threshold: float = 0.55,
-    starting_elo: float = 1000.0,
-    candidate_gpu: int = 0,
-    reference_gpu: int = 1,
-    max_parallel: int = 4,
+    manifest_path: Optional[Path] = None,
+    output_dir: Optional[Path] = None,
+    model_name: Optional[str] = None,
+    games_per_level: Optional[int] = None,
+    promotion_threshold: Optional[float] = None,
+    starting_elo: Optional[float] = None,
+    max_parallel: Optional[int] = None,
+    max_moves_per_game: Optional[int] = None,
     verbose: bool = False,
-    max_levels: Optional[int] = None
+    max_levels: Optional[int] = None,
+    reference_endpoint: Optional[str] = None
 ) -> dict:
     """Run the full ladder evaluation asynchronously.
     
+    Uses configuration from configs/config.yaml for defaults.
+    
     Args:
         candidate: The candidate player to evaluate
-        manifest_path: Path to reference models manifest
-        output_dir: Base output directory
-        model_name: Name for this evaluation run
-        games_per_level: Games per level
-        promotion_threshold: Win rate needed for promotion
-        starting_elo: Starting Elo estimate
-        candidate_gpu: GPU for candidate (if KataGo)
-        reference_gpu: GPU for reference KataGo
-        max_parallel: Max parallel games per level
+        manifest_path: Path to reference models manifest (default: from config)
+        output_dir: Base output directory (default: from config)
+        model_name: Name for this evaluation run (default: candidate.name)
+        games_per_level: Games per level (default: from config)
+        promotion_threshold: Win rate needed for promotion (default: from config)
+        starting_elo: Starting Elo estimate (default: from config)
+        max_parallel: Max parallel games per level (default: from config)
+        max_moves_per_game: Max moves per game (default: from config)
         verbose: Print detailed output
         max_levels: Maximum levels to evaluate (None = all)
+        reference_endpoint: Initial reference server endpoint (if already running)
     
     Returns:
         Results dictionary
     """
+    # Load configuration
+    cfg = load_config()
+    eval_cfg = cfg.get("eval", {}).get("ladder", {})
+    
+    # Apply defaults from config
+    manifest_path = manifest_path or Path(cfg["eval"]["manifest_path"])
+    output_dir = output_dir or Path(cfg["eval"]["output_dir"])
+    model_name = model_name or candidate.name
+    games_per_level = games_per_level or eval_cfg.get("games_per_level", 48)
+    promotion_threshold = promotion_threshold or eval_cfg.get("promotion_threshold", 0.55)
+    starting_elo = starting_elo or eval_cfg.get("starting_elo", 1000)
+    max_parallel = max_parallel or eval_cfg.get("max_parallel", 4)
+    max_moves_per_game = max_moves_per_game or eval_cfg.get("max_moves_per_game", 500)
+    
+    # Make paths absolute
+    if not manifest_path.is_absolute():
+        manifest_path = REPO_ROOT / manifest_path
+    if not output_dir.is_absolute():
+        output_dir = REPO_ROOT / output_dir
+    
     # Load manifest
     assert manifest_path.exists(), f"Manifest not found: {manifest_path}"
     with open(manifest_path) as f:
@@ -172,6 +290,7 @@ async def run_ladder_evaluation_async(
         "games_per_level": games_per_level,
         "promotion_threshold": promotion_threshold,
         "starting_elo": starting_elo,
+        "max_moves_per_game": max_moves_per_game,
         "timestamp": datetime.now().isoformat()
     }
     with open(run_dir / "config.json", "w") as f:
@@ -212,11 +331,12 @@ async def run_ladder_evaluation_async(
             if candidate.requires_logging:
                 candidate.set_log_path(level_dir / "llm_log.jsonl")
             
-            # Create reference KataGo player
+            # Restart reference server with level-specific model
+            ref_endpoint = restart_reference_server(str(model_path))
+            
+            # Create reference player connected to the restarted server
             reference = KataGoPlayer(
-                model_path=str(model_path),
-                gpu_id=reference_gpu,
-                port=8200 + level,  # Unique port per level
+                endpoint=ref_endpoint,
                 name=f"reference_level_{level}"
             )
             
@@ -232,6 +352,7 @@ async def run_ladder_evaluation_async(
                     reference=reference,
                     variations=variations,
                     max_parallel=max_parallel,
+                    max_moves=max_moves_per_game,
                     verbose=verbose
                 )
                 
@@ -333,17 +454,17 @@ async def run_ladder_evaluation_async(
 
 def run_ladder_evaluation(
     candidate: Player,
-    manifest_path: Path,
-    output_dir: Path,
-    model_name: str,
-    games_per_level: int = 48,
-    promotion_threshold: float = 0.55,
-    starting_elo: float = 1000.0,
-    candidate_gpu: int = 0,
-    reference_gpu: int = 1,
-    max_parallel: int = 4,
+    manifest_path: Optional[Path] = None,
+    output_dir: Optional[Path] = None,
+    model_name: Optional[str] = None,
+    games_per_level: Optional[int] = None,
+    promotion_threshold: Optional[float] = None,
+    starting_elo: Optional[float] = None,
+    max_parallel: Optional[int] = None,
+    max_moves_per_game: Optional[int] = None,
     verbose: bool = False,
-    max_levels: Optional[int] = None
+    max_levels: Optional[int] = None,
+    reference_endpoint: Optional[str] = None
 ) -> dict:
     """Synchronous wrapper for run_ladder_evaluation_async."""
     return asyncio.run(run_ladder_evaluation_async(
@@ -354,9 +475,9 @@ def run_ladder_evaluation(
         games_per_level=games_per_level,
         promotion_threshold=promotion_threshold,
         starting_elo=starting_elo,
-        candidate_gpu=candidate_gpu,
-        reference_gpu=reference_gpu,
         max_parallel=max_parallel,
+        max_moves_per_game=max_moves_per_game,
         verbose=verbose,
-        max_levels=max_levels
+        max_levels=max_levels,
+        reference_endpoint=reference_endpoint
     ))

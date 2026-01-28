@@ -1,0 +1,102 @@
+# =============================================================================
+# KataGo Evaluation and Training Configuration
+# =============================================================================
+# This is the central config file for the repository.
+# All paths are relative to the repository root.
+
+# =============================================================================
+# Server Configuration
+# =============================================================================
+servers:
+  # Candidate KataGo server
+  candidate:
+    port: 9200
+    host: "0.0.0.0"
+    # Model to use for candidate (can be overridden via environment)
+    model_path: "assets/models/kata1-b28c512nbt-s12223529728-d5663671073.bin.gz"
+  
+  # Reference KataGo server (for ladder evaluation)
+  reference:
+    port: 9201
+    host: "0.0.0.0"
+    # Default model (overridden per level during ladder evaluation)
+    model_path: "assets/models/level_01_kata1-b6c96-s175395328-d26788732.txt.gz"
+
+  # OpenAI-compatible endpoints (vLLM, ngrok, etc.)
+  openai:
+    primary: "https://transmissively-conidial-fredrick.ngrok-free.dev/v1"
+    secondary: "http://localhost:8002/v1"
+
+# =============================================================================
+# Data Directories
+# =============================================================================
+data:
+  sgf_dir: data/raw_sgfs/kata1-b28c512nbt-s8209287936-d4596492266
+  position_dir: data/positions
+  move_dir: data/moves
+
+# =============================================================================
+# KataGo Engine Configuration
+# =============================================================================
+katago:
+  backend: "trt"
+  threads: 384
+  batch_size: 384
+  # TensorRT binary (preferred)
+  binary_path: "assets/bin/katago-trt/katago"
+  gtp_config_path: "assets/bin/katago-trt/default_gtp.cfg"
+
+# =============================================================================
+# Evaluation Configuration
+# =============================================================================
+eval:
+  manifest_path: "assets/models/manifest.json"
+  output_dir: "data/eval"
+  
+  # Ladder evaluation parameters
+  ladder:
+    games_per_level: 48
+    promotion_threshold: 0.55
+    starting_elo: 1000
+    max_parallel: 4
+    max_moves_per_game: 500
+
+# =============================================================================
+# Test Configuration
+# =============================================================================
+test:
+  # Test-specific parameters (smaller values for faster tests)
+  games_per_level: 5
+  max_levels: 3
+  min_valid_moves: 10
+  max_moves_per_game: 100
+  output_dir: "/tmp/katago_test_runs"
+
+# =============================================================================
+# PBS/HPC Configuration
+# =============================================================================
+pbs:
+  queue: "AISG_debug"
+  walltime: "24:00:00"
+  ncpus: 32
+  ngpus: 1
+  mem: "200gb"
+  # Preferred compute node (optional)
+  host: "hopper-34"
+  # Container configuration
+  container:
+    sqsh_path: "/scratch/Projects/SPEC-SF-AISG/sqsh/go.sqsh"
+    name: "katago_dev"
+  # Log directory
+  log_dir: "runtime/log"
+
+# =============================================================================
+# Benchmark Configuration
+# =============================================================================
+benchmark:
+  concurrency: ""
+  matrix_csv: "runtime/benchmark/bench_matrix.csv"
+  results_dir: "runtime/benchmark/results"
+  gpu_log_interval_sec: 1
+  gpu_util_threshold: 90
+  gpu_mem_threshold: 90

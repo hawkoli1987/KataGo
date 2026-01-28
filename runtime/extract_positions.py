@@ -4,14 +4,19 @@ Extract KataGo positions from SGF files to JSONL format.
 
 Two modes:
 1. --filter: Remove rectangular boards from input directory (destructive, run once)
-2. --extract: Extract positions to JSONL (assumes filtering already done)
+2. --extract: Extract positions to JSONL (skips rectangular boards automatically)
 
-Output structure:
+Output structure (grouped by board size only):
     output_dir/
-    └── inputs/
-        └── 19x19_koPOSITIONALscoreTERRITORYtaxALLsui0_-0.0/
-            ├── train.jsonl
-            └── test.jsonl
+    ├── 9x9/
+    │   ├── train.jsonl
+    │   └── test.jsonl
+    ├── 13x13/
+    │   ├── train.jsonl
+    │   └── test.jsonl
+    └── 19x19/
+        ├── train.jsonl
+        └── test.jsonl
 """
 
 import argparse
@@ -145,9 +150,6 @@ def parse_sgf_file(sgf_path: Path) -> Tuple[List[dict], GameProperties]:
     with open(sgf_path, 'rb') as f:
         sgf_content = f.read()
     
-    assert not re.search(rb'SZ\[(\d+):(\d+)\]', sgf_content), \
-        f"Rectangular board in {sgf_path} - run --filter first"
-    
     game = sgf.Sgf_game.from_bytes(sgf_content)
     root = game.get_root()
     board_size = game.get_size()
@@ -211,27 +213,41 @@ def parse_sgf_file(sgf_path: Path) -> Tuple[List[dict], GameProperties]:
 # Step 3: Extract All Positions
 # =============================================================================
 
-def extract_positions(sgf_files: List[Path]) -> Dict[GameProperties, List[dict]]:
+def extract_positions(sgf_files: List[Path]) -> Dict[int, List[dict]]:
     """
-    Extract positions from all SGF files, grouped by game properties.
+    Extract positions from all SGF files, grouped by board size.
+    
+    Automatically skips:
+    - Rectangular board files
+    - Files with no evaluation comments
     
     Returns:
-        Dict mapping GameProperties to list of KataGo queries
+        Dict mapping board_size (int) to list of KataGo queries
     """
-    queries_by_props: Dict[GameProperties, List[dict]] = defaultdict(list)
+    queries_by_size: Dict[int, List[dict]] = defaultdict(list)
     skipped_no_evals = 0
+    skipped_rectangular = 0
     
     for sgf_file in tqdm(sgf_files, desc="Extracting positions"):
+        # Skip rectangular boards
+        if is_rectangular_board(sgf_file):
+            skipped_rectangular += 1
+            continue
+        
         queries, game_props = parse_sgf_file(sgf_file)
+        
         if len(queries) == 0:
             skipped_no_evals += 1
             continue
-        queries_by_props[game_props].extend(queries)
+        queries_by_size[game_props.board_size].extend(queries)
+    
+    if skipped_rectangular > 0:
+        print(f"Skipped {skipped_rectangular} rectangular board files")
     
     if skipped_no_evals > 0:
         print(f"Skipped {skipped_no_evals} files with no evaluations")
     
-    return queries_by_props
+    return queries_by_size
 
 
 # =============================================================================
@@ -239,24 +255,27 @@ def extract_positions(sgf_files: List[Path]) -> Dict[GameProperties, List[dict]]
 # =============================================================================
 
 def save_jsonl_files(
-    queries_by_props: Dict[GameProperties, List[dict]],
+    queries_by_size: Dict[int, List[dict]],
     output_dir: Path,
     train_ratio: float
 ) -> int:
     """
     Save queries to JSONL files, split into train/test.
     
+    Output structure:
+        output_dir/<boardsize>/train.jsonl
+        output_dir/<boardsize>/test.jsonl
+    
     Returns:
         Total number of positions saved
     """
-    inputs_dir = output_dir / "inputs"
-    inputs_dir.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
     
     total_positions = 0
     
-    for game_props, queries in queries_by_props.items():
-        dirname = game_props.to_dirname()
-        group_dir = inputs_dir / dirname
+    for board_size, queries in sorted(queries_by_size.items()):
+        dirname = f"{board_size}x{board_size}"
+        group_dir = output_dir / dirname
         group_dir.mkdir(parents=True, exist_ok=True)
         
         random.shuffle(queries)
@@ -347,17 +366,17 @@ def run_extract(args: argparse.Namespace) -> int:
         sgf_files = random.sample(sgf_files, args.max_games)
         print(f"Sampled {args.max_games} games")
     
-    # Extract positions
-    queries_by_props = extract_positions(sgf_files)
+    # Extract positions grouped by board size
+    queries_by_size = extract_positions(sgf_files)
     
     print(f"\nExtraction complete:")
-    print(f"  Groups: {len(queries_by_props)}")
+    print(f"  Board sizes: {sorted(queries_by_size.keys())}")
     
-    assert len(queries_by_props) > 0, "No positions extracted!"
+    assert len(queries_by_size) > 0, "No positions extracted!"
     
     # Save JSONL files
     print(f"\nSaving to {args.output_dir}:")
-    total = save_jsonl_files(queries_by_props, args.output_dir, args.train_ratio)
+    total = save_jsonl_files(queries_by_size, args.output_dir, args.train_ratio)
     
     print(f"\nTotal positions: {total}")
     return 0

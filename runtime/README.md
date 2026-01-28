@@ -337,6 +337,10 @@ e.g. @katago_player.py (22-24) @runtime/config.yaml:9-11
 
 5. @eval/katago_server.py seems to be duplicating the functions of @runtime/enroot_start.pbs. If so, let's remove it, and start the reference model using existing scripts with minor modifications
 
+6. identify all scripts that creates the following, make sure they were all stored inside `log` instead, 
+- gtp_logs
+- go_engine.o<job_id>
+
 ## refactor: using venv for dev
 - create pyproject.toml based on runtime/enroot_create.pbs, which captures all dependencies required to run applications in this repo
 - build .venv and use it for dev and testing purpose
@@ -347,3 +351,26 @@ e.g. @katago_player.py (22-24) @runtime/config.yaml:9-11
   - 'make test', run all pytests inside 'tests'
   - 'make extract', extract sgf data from a directory into jsonl, following 'runtime/extract_positions.py' sample script
   - 'make train', train a model in veRL, by `qsub train/train.pbs`
+
+
+# Train
+once you have obtained the 'positions' and 'moves' data, please use the 19x19 data for veRL training. 
+use the scripts in @train/online_env as a reference, which was used for online go analysis engine serving. 
+create a new set of script in @train/offline_env, use it for training, and set the `train/offline_env.train.pbs` as the default training entrypoint in Makefile
+
+need to modify the reward.py, such that it will have options to include different losses, between LLM prediction and katago analysis result. The weight of each loss should be read from the config.yaml
+  - r_wr, ∈ [-1,0], negative MSE on the root winrate, before the current player move
+  - r_move, ∈ {0, 1}, if the LLM move as the current player corresponds with katago's best move
+  - r_legal, ∈ {0, -1}, if the LLM move is legal
+
+the reward.py should have logic, which loads different prompt template from `configs/prompts.json` based on our selection of losses,
+the reward.py should also load and expand the model prompt, with the variable values including following
+  - rulestring
+  - komi
+  - current_player
+  - move_history
+
+need to enable thinking model of the model during rollout
+need to selectively (at each checkpointing interval) save out one sample model rollout, into "<LOG_DIR>/rollout.llm_log.jsonl". The content should be using the same format as that in the eval pipeline, but with the addition fields containing the applicable rewards
+wandb needs to log the 
+

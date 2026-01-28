@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="/scratch/Projects/SPEC-SF-AISG/source_files/KataGo"
-CONFIG_YAML="${ROOT_DIR}/runtime/config.yaml"
+CONFIG_YAML="${ROOT_DIR}/configs/config.yaml"
 MATRIX_CSV="$(grep -E '^ *matrix_csv:' "${CONFIG_YAML}" | awk '{print $2}' | tr -d '\"')"
 RESULTS_DIR="$(grep -E '^ *results_dir:' "${CONFIG_YAML}" | awk '{print $2}' | tr -d '\"')"
 MODEL_PATH="$(grep -E '^ *model_path:' "${CONFIG_YAML}" | awk '{print $2}' | tr -d '\"')"
@@ -14,7 +14,7 @@ GPU_UTIL_THRESHOLD="$(grep -E '^ *gpu_util_threshold:' "${CONFIG_YAML}" | awk '{
 GPU_MEM_THRESHOLD="$(grep -E '^ *gpu_mem_threshold:' "${CONFIG_YAML}" | awk '{print $2}' | tr -d '\"')"
 
 if [ -z "${MATRIX_CSV}" ] || [ -z "${RESULTS_DIR}" ] || [ -z "${MODEL_PATH}" ]; then
-  echo "Missing benchmark settings in runtime/config.yaml" >&2
+  echo "Missing benchmark settings in configs/config.yaml" >&2
   exit 1
 fi
 

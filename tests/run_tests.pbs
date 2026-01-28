@@ -1,24 +1,27 @@
 #!/bin/bash
-#PBS -N go_engine
+#PBS -N pytest_tests
 #PBS -q AISG_debug
-#PBS -l walltime=24:00:00
-#PBS -l select=1:mem=200gb:ncpus=32:ngpus=1:host=hopper-34
+#PBS -l walltime=01:00:00
+#PBS -l select=1:mem=64gb:ncpus=8:ngpus=1
 #PBS -j oe
 #PBS -o /dev/null
-#PBS -W umask=0007
 
 set -euo pipefail
 
-# Create log directory with job ID and redirect all output
-LOG_DIR="/scratch_aisg/SPEC-SF-AISG/yuli/ARF-Training/repos/KataGo/runtime/log"
+# Create log directory with job ID
+# Use realpath to resolve symlinks (container mounts require actual paths)
+REPO_DIR="/scratch/Projects/SPEC-SF-AISG/source_files/KataGo"
+LOG_DIR="${REPO_DIR}/runtime/log"
 mkdir -p "${LOG_DIR}/${PBS_JOBID}"
-exec >> "${LOG_DIR}/${PBS_JOBID}/pbs.log" 2>&1
 
-echo "=== Job started at $(date) ==="
+# Redirect output to log file
+exec >> "${LOG_DIR}/${PBS_JOBID}/test.log" 2>&1
+
+echo "=== Test started at $(date) ==="
 echo "PBS_JOBID: ${PBS_JOBID}"
 echo "Hostname: $(hostname)"
 
-# Configuration
+# Configuration (same as enroot_start.pbs)
 export SHARED_FS="/scratch/Projects/SPEC-SF-AISG"
 export SQSH_DIR="${SHARED_FS}/sqsh"
 export SQSH_FILE="${SQSH_DIR}/go.sqsh"
@@ -26,35 +29,21 @@ export CONTAINER_NAME="katago_dev"
 export ENROOT_DATA_PATH="${SHARED_FS}/.enroot/data"
 export HOST_NVIDIA_MOUNT="/opt/host-nvidia"
 
-# CUDA driver libraries - must be mounted from host (cannot be in container)
-# These are tied to the kernel driver version on the host
+# CUDA driver libraries
 HOST_LIBCUDA="/lib64/libcuda.so.1"
 HOST_LIBNVML="/lib64/libnvidia-ml.so.1"
 
-# Server port (default 9200, matching config.yaml)
-PORT="${ANALYSIS_PORT:-9200}"
-
 mkdir -p "${ENROOT_DATA_PATH}"
 
-# Verify required files exist
+# Verify required files
 echo "Checking required files..."
 if [ ! -f "${SQSH_FILE}" ]; then
     echo "ERROR: Missing ${SQSH_FILE}. Run runtime/enroot_create.pbs first." >&2
     exit 1
 fi
 
-if [ ! -f "${HOST_LIBCUDA}" ]; then
-    echo "ERROR: Missing ${HOST_LIBCUDA} on host" >&2
-    exit 1
-fi
-
-if [ ! -f "${HOST_LIBNVML}" ]; then
-    echo "WARNING: Missing ${HOST_LIBNVML} on host (nvidia-smi may not work)"
-fi
-
 echo "SQSH file: ${SQSH_FILE} [OK]"
-echo "libcuda: ${HOST_LIBCUDA} [OK]"
-echo "libnvml: ${HOST_LIBNVML} [$([ -f ${HOST_LIBNVML} ] && echo OK || echo MISSING)]"
+echo "libcuda: ${HOST_LIBCUDA} [$([ -f ${HOST_LIBCUDA} ] && echo OK || echo MISSING)]"
 
 export LD_LIBRARY_PATH="${HOST_NVIDIA_MOUNT}:${LD_LIBRARY_PATH:-}"
 
@@ -64,7 +53,7 @@ if ! enroot list | grep -q "^${CONTAINER_NAME}$"; then
     enroot create -n "${CONTAINER_NAME}" "${SQSH_FILE}"
 fi
 
-# Ensure mount target exists inside the container rootfs
+# Prepare container mount points
 echo "Preparing container mount points..."
 enroot start --root --rw \
     --mount="${HOME}:${HOME}" \
@@ -72,9 +61,9 @@ enroot start --root --rw \
   "${CONTAINER_NAME}" \
   /bin/bash -lc "mkdir -p ${HOST_NVIDIA_MOUNT}"
 
-echo "Starting analysis server on port ${PORT}..."
+echo "Running pytest inside container..."
 
-# Start the analysis server
+# Run tests inside the container
 enroot start --root --rw \
     --env LD_LIBRARY_PATH \
     --mount="${HOME}:${HOME}" \
@@ -83,4 +72,11 @@ enroot start --root --rw \
     --mount="${HOST_LIBNVML}:${HOST_NVIDIA_MOUNT}/libnvidia-ml.so.1" \
     --mount="/usr/bin/nvidia-smi:/usr/bin/nvidia-smi" \
   "${CONTAINER_NAME}" \
-  /bin/bash -lc "cd /scratch/Projects/SPEC-SF-AISG/source_files/KataGo && uvicorn runtime.analysis_server:app --host 0.0.0.0 --port ${PORT}"
+  /bin/bash -lc "
+    cd ${REPO_DIR}
+    export PYTHONPATH=\${PYTHONPATH}:${REPO_DIR}
+    pip install -q pytest pytest-asyncio aiohttp httpx pydantic sgfmill tqdm
+    python3 -m pytest tests -v
+  "
+
+echo "=== Tests completed at $(date) ==="

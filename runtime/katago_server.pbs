@@ -1,0 +1,111 @@
+#!/bin/bash
+#PBS -N katago_server
+#PBS -q AISG_debug
+#PBS -l walltime=24:00:00
+#PBS -l select=1:mem=200gb:ncpus=32:ngpus=1
+#PBS -j oe
+#PBS -o /dev/null
+#PBS -W umask=0007
+
+# =============================================================================
+# Parameterized KataGo Analysis Server PBS Script
+# =============================================================================
+# This script starts a KataGo analysis server with configurable model and port.
+#
+# Environment variables (set via qsub -v):
+#   MODEL_PATH: Path to KataGo model weights (required)
+#   SERVER_PORT: Port for the server (default: 9200)
+#   SERVER_NAME: Name for logging (default: katago)
+#
+# Usage:
+#   qsub -v MODEL_PATH=/path/to/model.bin.gz,SERVER_PORT=9200 runtime/katago_server.pbs
+# =============================================================================
+
+set -euo pipefail
+
+# Configuration from environment (with defaults)
+MODEL_PATH="${MODEL_PATH:?ERROR: MODEL_PATH environment variable is required}"
+SERVER_PORT="${SERVER_PORT:-9200}"
+SERVER_NAME="${SERVER_NAME:-katago}"
+
+# Fixed paths
+REPO_DIR="/scratch/Projects/SPEC-SF-AISG/source_files/KataGo"
+SHARED_FS="/scratch/Projects/SPEC-SF-AISG"
+SQSH_FILE="${SHARED_FS}/sqsh/go.sqsh"
+CONTAINER_NAME="katago_dev"
+ENROOT_DATA_PATH="${SHARED_FS}/.enroot/data"
+HOST_NVIDIA_MOUNT="/opt/host-nvidia"
+
+# CUDA driver libraries
+HOST_LIBCUDA="/lib64/libcuda.so.1"
+HOST_LIBNVML="/lib64/libnvidia-ml.so.1"
+
+# Create log directory
+LOG_DIR="${REPO_DIR}/runtime/log/${PBS_JOBID}"
+mkdir -p "${LOG_DIR}"
+exec >> "${LOG_DIR}/pbs.log" 2>&1
+
+echo "=== ${SERVER_NAME} server started at $(date) ==="
+echo "PBS_JOBID: ${PBS_JOBID}"
+echo "Hostname: $(hostname)"
+echo "MODEL_PATH: ${MODEL_PATH}"
+echo "SERVER_PORT: ${SERVER_PORT}"
+
+mkdir -p "${ENROOT_DATA_PATH}"
+
+# Verify required files
+echo "Checking required files..."
+if [ ! -f "${SQSH_FILE}" ]; then
+    echo "ERROR: Missing ${SQSH_FILE}. Run runtime/enroot_create.pbs first." >&2
+    exit 1
+fi
+
+# Resolve model path (relative to repo root if not absolute)
+if [[ "${MODEL_PATH}" != /* ]]; then
+    FULL_MODEL_PATH="${REPO_DIR}/${MODEL_PATH}"
+else
+    FULL_MODEL_PATH="${MODEL_PATH}"
+fi
+
+if [ ! -f "${FULL_MODEL_PATH}" ]; then
+    echo "ERROR: Model file not found: ${FULL_MODEL_PATH}" >&2
+    exit 1
+fi
+
+echo "SQSH file: ${SQSH_FILE} [OK]"
+echo "Model file: ${FULL_MODEL_PATH} [OK]"
+echo "libcuda: ${HOST_LIBCUDA} [$([ -f ${HOST_LIBCUDA} ] && echo OK || echo MISSING)]"
+echo "libnvml: ${HOST_LIBNVML} [$([ -f ${HOST_LIBNVML} ] && echo OK || echo MISSING)]"
+
+export LD_LIBRARY_PATH="${HOST_NVIDIA_MOUNT}:${LD_LIBRARY_PATH:-}"
+
+# Create container if it doesn't exist
+if ! enroot list | grep -q "^${CONTAINER_NAME}$"; then
+    echo "Creating container ${CONTAINER_NAME}..."
+    enroot create -n "${CONTAINER_NAME}" "${SQSH_FILE}"
+fi
+
+# Ensure mount target exists
+echo "Preparing container mount points..."
+enroot start --root --rw \
+    --mount="${HOME}:${HOME}" \
+    --mount="${SHARED_FS}:${SHARED_FS}" \
+  "${CONTAINER_NAME}" \
+  /bin/bash -lc "mkdir -p ${HOST_NVIDIA_MOUNT}"
+
+echo "Starting analysis server on port ${SERVER_PORT}..."
+
+# Export model path for analysis_server.py
+export MODEL_PATH="${FULL_MODEL_PATH}"
+
+# Start the analysis server
+enroot start --root --rw \
+    --env LD_LIBRARY_PATH \
+    --env MODEL_PATH \
+    --mount="${HOME}:${HOME}" \
+    --mount="${SHARED_FS}:${SHARED_FS}" \
+    --mount="${HOST_LIBCUDA}:${HOST_NVIDIA_MOUNT}/libcuda.so.1" \
+    --mount="${HOST_LIBNVML}:${HOST_NVIDIA_MOUNT}/libnvidia-ml.so.1" \
+    --mount="/usr/bin/nvidia-smi:/usr/bin/nvidia-smi" \
+  "${CONTAINER_NAME}" \
+  /bin/bash -lc "cd ${REPO_DIR} && uvicorn runtime.analysis_server:app --host 0.0.0.0 --port ${SERVER_PORT}"
