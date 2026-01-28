@@ -82,4 +82,4 @@ enroot start --root --rw \
     --mount="${HOST_LIBNVML}:${HOST_NVIDIA_MOUNT}/libnvidia-ml.so.1" \
     --mount="/usr/bin/nvidia-smi:/usr/bin/nvidia-smi" \
   "${CONTAINER_NAME}" \
-  /bin/bash -lc "cd /scratch/Projects/SPEC-SF-AISG/source_files/KataGo && uvicorn runtime.analysis_server:app --host 0.0.0.0 --port ${PORT}"
+  /bin/bash -lc "cd /scratch_aisg/SPEC-SF-AISG/yuli/ARF-Training/repos/KataGo && uvicorn runtime.analysis_server:app --host 0.0.0.0 --port ${PORT}"

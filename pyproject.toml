@@ -1,0 +1,58 @@
+[project]
+name = "katago-eval"
+version = "0.1.0"
+description = "KataGo evaluation and training pipeline"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+
+dependencies = [
+    # FastAPI server
+    "fastapi",
+    "uvicorn",
+    
+    # HTTP clients
+    "aiohttp",
+    "httpx",
+    
+    # Data handling
+    "pyyaml",
+    "pydantic",
+    
+    # SGF processing
+    "sgfmill",
+    "tqdm",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "ruff",
+    "mypy",
+]
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["eval*", "runtime*", "tests*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "-v"
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.9"
+ignore_missing_imports = true

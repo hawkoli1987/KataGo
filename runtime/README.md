@@ -321,3 +321,29 @@ data/eval/<model_name>/
 | Elo calculation | Per-game update | Provides progression visibility |
 | Reference models | ~10-15 levels | Sufficient granularity for Elo estimation |
 | Output folder | `--model-name` (mandatory) | Clear identification of evaluation runs |
+
+## refactor; eval
+1. the current test is full of mock data, please remove all mock data, use actual data for test@tests/test_eval.py:184-187 
+
+2. in test, GAMES_PER_LEVEL_TEST should be 5, MAX_LEVELS_TEST should be 3, MIN_VALID_MOVES should be 10
+@tests/test_eval.py:42-44
+
+3. in all locations in this repo, where the katago binary and model is used, migrate the katago binaries and katago model weights into this repo, 
+- binaries: /scratch/Projects/SPEC-SF-AISG/katago/bin -> assets/bin; 
+- modes: /scratch/Projects/SPEC-SF-AISG/katago/models -> assets/models
+e.g. @katago_player.py (22-24) @runtime/config.yaml:9-11 
+
+4. always use tensorRT instead of cuda version of katago binary
+
+5. @eval/katago_server.py seems to be duplicating the functions of @runtime/enroot_start.pbs. If so, let's remove it, and start the reference model using existing scripts with minor modifications
+
+## refactor: using venv for dev
+- create pyproject.toml based on runtime/enroot_create.pbs, which captures all dependencies required to run applications in this repo
+- build .venv and use it for dev and testing purpose
+- modify the Makefile, to use it for orchestration, it should have the following capabilities:
+  - 'make install': install the .venv based on pyproject.toml
+  - 'make activate': activate the .venv environment
+  - 'make run': start the katago analysis engine using runtime/enroot_start.pbs, and print its fastapi endpoint, 
+  - 'make test', run all pytests inside 'tests'
+  - 'make extract', extract sgf data from a directory into jsonl, following 'runtime/extract_positions.py' sample script
+  - 'make train', train a model in veRL, by `qsub train/train.pbs`
