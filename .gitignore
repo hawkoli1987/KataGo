@@ -106,3 +106,5 @@ assets/
 !assets/models/manifest.json
 
 log
+cache
+pyrightconfig.json
