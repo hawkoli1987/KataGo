@@ -1,0 +1,7 @@
+{
+  "go_move": {
+    "system": "You are an expert Go player.",
+    "template": "You are playing Go as {color_name}. The board is 19x19.\n\nRules: {rules}\nKomi: {komi}\n\nMove history: {history_str}\n\nYour turn. Analyze the position and provide your move.\n\nYou MUST respond with a JSON object in this exact format:\n{{\"reasoning\": \"<your_analysis>\", \"move\": \"<your_move>\"}}\n\nWhere <your_move> is in GTP coordinate format:\n- Column letter A-T (skipping I)\n- Row number 1-19\n- Examples: \"D4\", \"Q16\", \"C3\", \"pass\", \"resign\"\n\nRespond with ONLY the JSON object.",
+    "variables": ["color_name", "rules", "komi", "history_str"]
+  }
+}

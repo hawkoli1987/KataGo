@@ -5,13 +5,16 @@ This script evaluates an LLM's Go-playing strength by having it play against
 KataGo reference models in a ladder competition with Elo rating.
 
 Usage:
-    python eval/eval.py \
+    python3 eval/eval.py \
       --candidate-type openai \
-      --candidate-endpoint https://your-vllm-endpoint.example.com/v1 \
-      --candidate-model "deepseek-ai/DeepSeek-V3.2" \
-      --model-name "deepseek-v3.2-test" \
+      --candidate-endpoint http://localhost:8002/v1 \
+      --model-name "qwen3-test" \
       --games-per-level 48 \
       --promotion-threshold 0.55
+      
+    Note: 
+    - Use http:// (not https://) for local vLLM endpoints
+    - --candidate-model is auto-detected from the vLLM API if not provided
 """
 
 import argparse
@@ -86,10 +89,12 @@ class LevelResult:
 class KataGoGTP:
     """Wrapper for KataGo in GTP mode."""
     
-    def __init__(self, katago_path: str, model_path: str, config_path: Optional[str] = None):
+    def __init__(self, katago_path: str, model_path: str, config_path: Optional[str] = None,
+                 log_dir: str = "log"):
         self.katago_path = katago_path
         self.model_path = model_path
         self.config_path = config_path
+        self.log_dir = log_dir
         self.process = None
         self._stderr_output = []
     
@@ -100,6 +105,8 @@ class KataGoGTP:
             cmd.extend(["-model", self.model_path])
         if self.config_path:
             cmd.extend(["-config", self.config_path])
+        # Override log directory
+        cmd.extend(["-override-config", f"logDir={self.log_dir}"])
         
         print(f"Starting KataGo: {' '.join(cmd)}")
         
@@ -190,6 +197,53 @@ class KataGoGTP:
     def final_score(self) -> str:
         """Get final score."""
         return self.send_command("final_score")
+    
+    def get_win_rate(self, color: str, visits: int = 100) -> Optional[float]:
+        """Get KataGo's win rate estimation for the specified color.
+        
+        Uses kata-analyze to get the root win rate from KataGo's perspective.
+        
+        Args:
+            color: The color to get win rate for ("B" or "W")
+            visits: Number of visits for analysis (higher = more accurate but slower)
+        
+        Returns:
+            Win rate as float [0, 1], or None if analysis failed
+        """
+        # Send kata-analyze command with rootInfo
+        cmd = f"kata-analyze {color} {visits} rootInfo true"
+        self.process.stdin.write(cmd + "\n")
+        self.process.stdin.flush()
+        
+        # Read until we get the analysis output
+        response_lines = []
+        max_wait = 30  # Maximum seconds to wait
+        import time
+        start_time = time.time()
+        
+        while time.time() - start_time < max_wait:
+            line = self.process.stdout.readline()
+            if line:
+                response_lines.append(line.strip())
+                # Look for rootInfo in the response
+                if "rootInfo" in line:
+                    # Send newline to stop the analysis
+                    self.process.stdin.write("\n")
+                    self.process.stdin.flush()
+                    break
+        
+        # Parse the response to extract win rate
+        full_response = " ".join(response_lines)
+        
+        # Extract winrate from rootInfo section
+        # Format: ... rootInfo visits 100 winrate 0.523 ...
+        import re
+        match = re.search(r'rootInfo.*?winrate\s+([\d.]+)', full_response)
+        if match:
+            win_rate = float(match.group(1))
+            return win_rate
+        
+        return None
 
 
 def compute_elo_update(candidate_elo: float, opponent_elo: float, 
@@ -254,8 +308,17 @@ def play_single_game(
     for move_num in range(max_moves):
         if current_color == candidate_color:
             # LLM's turn
+            # Get KataGo's win rate estimation for the candidate
+            # Note: win_rate is from the candidate's perspective
+            win_rate = None
             try:
-                move = llm_player.get_move(move_history, rule_string, komi, current_color)
+                win_rate = katago.get_win_rate(current_color, visits=50)
+            except Exception:
+                pass  # Continue without win rate if analysis fails
+            
+            try:
+                move = llm_player.get_move(move_history, rule_string, komi, current_color,
+                                          win_rate=win_rate)
             except Exception as e:
                 if verbose:
                     print(f"  LLM error: {e}")
@@ -478,6 +541,10 @@ def run_ladder_evaluation(
         level_dir = games_dir / f"level_{level:02d}"
         level_dir.mkdir(exist_ok=True)
         
+        # Set LLM log path for this level
+        llm_log_path = level_dir / "llm_log.jsonl"
+        llm_player.set_log_path(llm_log_path)
+        
         # Start KataGo with this model
         katago = KataGoGTP(katago_path, str(model_path), katago_config)
         try:
@@ -497,6 +564,9 @@ def run_ladder_evaluation(
             for game_idx, (rule_name, rule_string, komi, candidate_color) in enumerate(variations):
                 print(f"  Game {game_idx + 1}/{len(variations)}: "
                       f"{rule_name}, komi={komi}, LLM={candidate_color}", end="")
+                
+                # Reset move counter for new game
+                llm_player.reset_move_counter(game_id=game_idx + 1)
                 
                 result = play_single_game(
                     game_id=game_idx + 1,
@@ -617,8 +687,8 @@ def main():
                         help="Name for this evaluation run (used as output folder)")
     parser.add_argument("--candidate-type", choices=["openai", "huggingface"], required=True,
                         help="LLM player type")
-    parser.add_argument("--candidate-model", type=str, required=True,
-                        help="Model name or path")
+    parser.add_argument("--candidate-model", type=str, default=None,
+                        help="Model name or path (auto-detected from vLLM API if not provided)")
     
     # Optional arguments
     parser.add_argument("--candidate-endpoint", type=str, default="http://localhost:8001/v1",

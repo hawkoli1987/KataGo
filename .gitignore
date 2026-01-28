@@ -104,3 +104,5 @@ assets/
 *.pt
 *.ckpt
 !assets/models/manifest.json
+
+log

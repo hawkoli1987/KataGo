@@ -19,55 +19,53 @@ from pathlib import Path
 # Curated list of KataGo models spanning different strength levels
 # Format: (level, name, url, approx_elo, sha256)
 # Models selected from https://katagotraining.org/networks/
+# Note: Using .txt.gz extension for early models (they use text format)
 REFERENCE_MODELS = [
-    # Level 1: Very early training (~1000 Elo equivalent)
-    (1, "kata1-b6c96-s0", 
-     "https://media.katagotraining.org/uploaded/networks/models/kata1/kata1-b6c96-s175395328-d26788732.bin.gz",
+    # Level 1: Very early training (~1000 Elo equivalent, b6c96 architecture)
+    (1, "kata1-b6c96-s175395328-d26788732", 
+     "https://media.katagotraining.org/uploaded/networks/models/kata1/kata1-b6c96-s175395328-d26788732.txt.gz",
      1000, None),
     
-    # Level 2: Early training (~1500 Elo)
-    (2, "kata1-b10c128-s0",
-     "https://media.katagotraining.org/uploaded/networks/models/kata1/kata1-b10c128-s197428736-d67404019.bin.gz",
+    # Level 2: Early training (~1500 Elo, b10c128)
+    (2, "kata1-b10c128-s197428736-d67404019",
+     "https://media.katagotraining.org/uploaded/networks/models/kata1/kata1-b10c128-s197428736-d67404019.txt.gz",
      1500, None),
     
-    # Level 3: Mid-early training (~2000 Elo)
-    (3, "kata1-b15c192-s0",
-     "https://media.katagotraining.org/uploaded/networks/models/kata1/kata1-b15c192-s497233664-d149638345.bin.gz",
+    # Level 3: Mid-early training (~2000 Elo, b15c192)
+    (3, "kata1-b15c192-s497233664-d149638345",
+     "https://media.katagotraining.org/uploaded/networks/models/kata1/kata1-b15c192-s497233664-d149638345.txt.gz",
      2000, None),
     
-    # Level 4: Mid training (~2500 Elo)
-    (4, "kata1-b20c256-s0",
-     "https://media.katagotraining.org/uploaded/networks/models/kata1/kata1-b20c256x2-s668214784-d222255714.bin.gz",
+    # Level 4: Mid training (~2500 Elo, b20c256x2)
+    (4, "kata1-b20c256x2-s668214784-d222255714",
+     "https://media.katagotraining.org/uploaded/networks/models/kata1/kata1-b20c256x2-s668214784-d222255714.txt.gz",
      2500, None),
     
-    # Level 5: Mid-late training (~3000 Elo)
-    (5, "kata1-b40c256-s0",
-     "https://media.katagotraining.org/uploaded/networks/models/kata1/kata1-b40c256-s1462488320-d525879064.bin.gz",
-     3000, None),
+    # Note: Level 5 skipped due to lack of publicly available ~3000 Elo model
     
-    # Level 6: Late training (~3300 Elo)
-    (6, "kata1-b40c256-s1",
-     "https://media.katagotraining.org/uploaded/networks/models/kata1/kata1-b40c256-s4844871424-d1229425124.bin.gz",
+    # Level 5: Late training (~3300 Elo, b40c256x2)
+    (5, "kata1-b40c256x2-s5095420928-d1229425124",
+     "https://media.katagotraining.org/uploaded/networks/models/kata1/kata1-b40c256x2-s5095420928-d1229425124.bin.gz",
      3300, None),
     
-    # Level 7: Very strong (~3500 Elo)
-    (7, "kata1-b40c256-s2",
-     "https://media.katagotraining.org/uploaded/networks/models/kata1/kata1-b40c256-s7709731072-d1861271210.bin.gz",
+    # Level 6: Very strong (~3500 Elo, b18c384nbt)
+    (6, "kata1-b18c384nbt-s7709731328-d3715293823",
+     "https://media.katagotraining.org/uploaded/networks/models/kata1/kata1-b18c384nbt-s7709731328-d3715293823.bin.gz",
      3500, None),
     
-    # Level 8: Near-final kata1 (~3700 Elo)
-    (8, "kata1-b40c256-s3",
+    # Level 7: Near-final kata1 (~3700 Elo, b40c256 near-end)
+    (7, "kata1-b40c256-s11840935168-d2898845681",
      "https://media.katagotraining.org/uploaded/networks/models/kata1/kata1-b40c256-s11840935168-d2898845681.bin.gz",
      3700, None),
     
-    # Level 9: kata1-b18c384 strong variant (~3800 Elo)
-    (9, "kata1-b18c384-s0",
+    # Level 8: kata1-b18c384 strong variant (~3800 Elo)
+    (8, "kata1-b18c384nbt-s6582191360-d3422816034",
      "https://media.katagotraining.org/uploaded/networks/models/kata1/kata1-b18c384nbt-s6582191360-d3422816034.bin.gz",
      3800, None),
     
-    # Level 10: Strongest public model (~4000+ Elo)
-    (10, "kata1-b28c512-s0",
-     "https://media.katagotraining.org/uploaded/networks/models/kata1/kata1-b28c512nbt-s7439478016-d3876879921.bin.gz",
+    # Level 9: Strongest available (~4000+ Elo, b28c512)
+    (9, "kata1-b28c512nbt-s12223529728-d5663671073",
+     "https://media.katagotraining.org/uploaded/networks/models/kata1/kata1-b28c512nbt-s12223529728-d5663671073.bin.gz",
      4000, None),
 ]
 
@@ -224,8 +222,9 @@ def main():
         if levels_filter and level not in levels_filter:
             continue
         
-        # Determine output filename
-        filename = f"level_{level:02d}_{name}.bin.gz"
+        # Determine output filename - use the extension from the URL
+        url_ext = ".txt.gz" if url.endswith(".txt.gz") else ".bin.gz"
+        filename = f"level_{level:02d}_{name}{url_ext}"
         filepath = output_dir / filename
         
         print(f"Level {level}: {name} (~{approx_elo} Elo)")
