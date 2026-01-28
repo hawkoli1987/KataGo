@@ -1,238 +1,229 @@
-"""KataGo neural network player for Go evaluation.
+"""KataGo player using async HTTP to the analysis server.
 
-Uses KataGo GTP to generate moves, allowing evaluation of KataGo models.
+Spawns an analysis server subprocess and communicates via HTTP for stateless
+move generation, enabling parallel game execution.
 """
 
-import re
+import asyncio
+import os
+import signal
 import subprocess
+import sys
 import time
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
+
+import aiohttp
 
 from eval.players.base import Player
 
 
+# Paths relative to repo root
+REPO_ROOT = Path(__file__).parent.parent.parent.resolve()
+DEFAULT_BINARY_PATH = REPO_ROOT / "assets" / "bin" / "katago-trt" / "katago"
+DEFAULT_CONFIG_PATH = REPO_ROOT / "assets" / "bin" / "katago-trt" / "default_gtp.cfg"
+
+
 class KataGoPlayer(Player):
-    """KataGo neural network as a candidate player.
+    """KataGo player that spawns an analysis server for async move generation.
     
-    Runs KataGo in GTP mode and generates moves using genmove command.
+    Each instance runs a separate server process on a specified GPU and port.
+    Uses the runtime/analysis_server.py which provides /move endpoint.
     """
     
     def __init__(
         self,
-        katago_path: str,
         model_path: str,
-        config_path: str,
-        name: Optional[str] = None,
-        log_dir: str = "log"
+        gpu_id: int = 0,
+        port: int = 8100,
+        name: Optional[str] = None
     ):
         """Initialize KataGo player.
         
         Args:
-            katago_path: Path to KataGo executable
-            model_path: Path to KataGo model weights
-            config_path: Path to KataGo GTP config file
+            model_path: Path to KataGo model weights (relative to repo root or absolute)
+            gpu_id: GPU device ID to use
+            port: Port for the analysis server
             name: Player name (defaults to model filename)
-            log_dir: Directory for KataGo logs
         """
-        # Validate paths
-        assert Path(katago_path).exists(), f"KataGo executable not found: {katago_path}"
-        assert Path(model_path).exists(), f"Model not found: {model_path}"
-        assert Path(config_path).exists(), f"Config not found: {config_path}"
+        # Resolve model path
+        model_p = Path(model_path)
+        if not model_p.is_absolute():
+            model_p = REPO_ROOT / model_path
         
-        player_name = name or Path(model_path).stem
+        assert model_p.exists(), f"Model not found: {model_p}"
+        
+        player_name = name or model_p.stem
         super().__init__(name=player_name)
         
-        self.katago_path = katago_path
-        self.model_path = model_path
-        self.config_path = config_path
-        self.log_dir = log_dir
+        self.model_path = str(model_p.resolve())
+        self.gpu_id = gpu_id
+        self.port = port
         
-        self.process: Optional[subprocess.Popen] = None
-        self._current_rules: Optional[str] = None
-        self._current_komi: Optional[float] = None
+        self._process: Optional[subprocess.Popen] = None
+        self._session: Optional[aiohttp.ClientSession] = None
+        self._base_url = f"http://127.0.0.1:{port}"
     
     @property
     def requires_logging(self) -> bool:
         """KataGo players don't need LLM-style logging."""
         return False
     
-    def start(self):
-        """Start KataGo process."""
-        if self.process is not None:
+    async def start(self):
+        """Start the analysis server subprocess."""
+        if self._process is not None:
             return
         
+        # Build command - run the analysis server script directly
+        server_script = REPO_ROOT / "runtime" / "analysis_server.py"
+        
         cmd = [
-            self.katago_path, "gtp",
-            "-model", self.model_path,
-            "-config", self.config_path,
-            "-override-config", f"logDir={self.log_dir}"
+            sys.executable, str(server_script),
+            "--port", str(self.port)
         ]
         
-        print(f"Starting KataGo player: {' '.join(cmd)}")
+        # Set environment
+        env = os.environ.copy()
+        env["CUDA_VISIBLE_DEVICES"] = str(self.gpu_id)
+        env["MODEL_PATH"] = self.model_path
         
-        self.process = subprocess.Popen(
+        print(f"Starting KataGo server on GPU {self.gpu_id}, port {self.port}: {self.name}")
+        
+        self._process = subprocess.Popen(
             cmd,
-            stdin=subprocess.PIPE,
+            env=env,
+            cwd=str(REPO_ROOT),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1
+            start_new_session=True
         )
         
-        # Wait for startup
-        time.sleep(2)
+        # Wait for server to be ready
+        await self._wait_for_server(timeout=60)
         
-        if self.process.poll() is not None:
-            stderr = self.process.stderr.read()
-            raise RuntimeError(f"KataGo failed to start: {stderr}")
+        # Create HTTP session
+        self._session = aiohttp.ClientSession()
+        
+        print(f"KataGo server ready: {self._base_url}")
     
-    def stop(self):
-        """Stop KataGo process."""
-        if self.process is None:
+    async def _wait_for_server(self, timeout: float = 60):
+        """Wait for the server to become available."""
+        start_time = time.time()
+        
+        while time.time() - start_time < timeout:
+            # Check if process crashed
+            if self._process is not None and self._process.poll() is not None:
+                stderr = self._process.stderr.read().decode() if self._process.stderr else ""
+                raise RuntimeError(f"KataGo server failed to start: {stderr[:1000]}")
+            
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(f"{self._base_url}/health", timeout=aiohttp.ClientTimeout(total=2)) as resp:
+                        if resp.status == 200:
+                            return
+            except Exception:
+                pass
+            
+            await asyncio.sleep(1)
+        
+        raise RuntimeError(f"KataGo server did not become ready within {timeout}s")
+    
+    async def stop(self):
+        """Stop the analysis server subprocess."""
+        if self._session is not None:
+            await self._session.close()
+            self._session = None
+        
+        if self._process is None:
             return
         
         try:
-            if self.process.poll() is None:
-                self._send_command("quit")
-                self.process.wait(timeout=5)
-        except Exception:
-            try:
-                self.process.kill()
-                self.process.wait(timeout=2)
-            except Exception:
-                pass
-        finally:
-            self.process = None
-    
-    def _send_command(self, cmd: str) -> str:
-        """Send a GTP command and return the response."""
-        assert self.process is not None, "KataGo not started"
-        
-        self.process.stdin.write(cmd + "\n")
-        self.process.stdin.flush()
-        
-        response_lines = []
-        while True:
-            line = self.process.stdout.readline()
-            if line.strip() == "":
-                if response_lines:
+            # Send SIGTERM to process group
+            os.killpg(os.getpgid(self._process.pid), signal.SIGTERM)
+            
+            # Wait for graceful shutdown
+            for _ in range(10):
+                if self._process.poll() is not None:
                     break
-            else:
-                response_lines.append(line.rstrip())
+                await asyncio.sleep(0.5)
+            
+            # Force kill if still running
+            if self._process.poll() is None:
+                os.killpg(os.getpgid(self._process.pid), signal.SIGKILL)
+                self._process.wait(timeout=2)
+        except Exception as e:
+            print(f"Warning: Error stopping KataGo server: {e}")
+        finally:
+            self._process = None
         
-        return "\n".join(response_lines)
+        print(f"KataGo server stopped: {self.name}")
     
-    def _setup_game(self, rules: str, komi: float):
-        """Setup game state if rules/komi changed."""
-        if rules != self._current_rules or komi != self._current_komi:
-            self._send_command("clear_board")
-            self._send_command("boardsize 19")
-            self._send_command(f"komi {komi}")
-            self._send_command(f"kata-set-rules {rules}")
-            self._current_rules = rules
-            self._current_komi = komi
-    
-    def _replay_moves(self, move_history: list):
-        """Replay move history on the board."""
-        self._send_command("clear_board")
-        for color, move in move_history:
-            self._send_command(f"play {color} {move}")
-    
-    def get_move(
-        self, 
-        move_history: list, 
-        rules: str, 
-        komi: float, 
+    async def get_move(
+        self,
+        move_history: List[List[str]],
+        rules: str,
+        komi: float,
         color: str,
         win_rate: Optional[float] = None
     ) -> str:
-        """Get move from KataGo.
+        """Get move from KataGo server via HTTP."""
+        assert self._session is not None, "Player not started"
         
-        Note: win_rate is ignored for KataGo players since they compute their own.
-        """
-        # Ensure process is running
-        if self.process is None:
-            self.start()
+        payload = {
+            "moves": move_history,
+            "rules": rules,
+            "komi": komi,
+            "color": color,
+            "board_size": 19
+        }
         
-        # Setup game state
-        self._setup_game(rules, komi)
-        self._replay_moves(move_history)
+        try:
+            async with self._session.post(
+                f"{self._base_url}/move",
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=120)
+            ) as resp:
+                if resp.status != 200:
+                    text = await resp.text()
+                    print(f"KataGo server error: {text}")
+                    return ""
+                
+                data = await resp.json()
+                return data.get("move", "")
         
-        # Generate move
-        response = self._send_command(f"genmove {color}")
-        
-        # Response format: "= D4" or "= pass" or "= resign"
-        if response.startswith("="):
-            return response[1:].strip().upper()
-        
-        return ""
+        except Exception as e:
+            print(f"Error getting move from KataGo: {e}")
+            return ""
     
-    def play_move(self, color: str, move: str) -> str:
-        """Play a move on the board (used by reference engine)."""
-        assert self.process is not None, "KataGo not started"
-        return self._send_command(f"play {color} {move}")
-    
-    def genmove(self, color: str) -> str:
-        """Generate a move (simpler interface for reference engine)."""
-        assert self.process is not None, "KataGo not started"
-        response = self._send_command(f"genmove {color}")
-        if response.startswith("="):
-            return response[1:].strip().upper()
-        return ""
-    
-    def clear_board(self):
-        """Clear the board."""
-        assert self.process is not None, "KataGo not started"
-        return self._send_command("clear_board")
-    
-    def set_boardsize(self, size: int = 19):
-        """Set board size."""
-        assert self.process is not None, "KataGo not started"
-        return self._send_command(f"boardsize {size}")
-    
-    def set_komi(self, komi: float):
-        """Set komi."""
-        assert self.process is not None, "KataGo not started"
-        self._current_komi = komi
-        return self._send_command(f"komi {komi}")
-    
-    def set_rules(self, rules: str):
-        """Set rules."""
-        assert self.process is not None, "KataGo not started"
-        self._current_rules = rules
-        return self._send_command(f"kata-set-rules {rules}")
-    
-    def final_score(self) -> str:
-        """Get final score."""
-        assert self.process is not None, "KataGo not started"
-        return self._send_command("final_score")
-    
-    def get_win_rate(self, color: str, visits: int = 100) -> Optional[float]:
-        """Get KataGo's win rate estimation for the specified color."""
-        assert self.process is not None, "KataGo not started"
+    async def get_win_rate(
+        self,
+        move_history: List[List[str]],
+        rules: str,
+        komi: float,
+        color: str
+    ) -> Optional[float]:
+        """Get win rate from KataGo server."""
+        assert self._session is not None, "Player not started"
         
-        cmd = f"kata-analyze {color} {visits} rootInfo true"
-        self.process.stdin.write(cmd + "\n")
-        self.process.stdin.flush()
+        payload = {
+            "moves": move_history,
+            "rules": rules,
+            "komi": komi,
+            "color": color,
+            "board_size": 19
+        }
         
-        response_lines = []
-        max_wait = 30
-        start_time = time.time()
+        try:
+            async with self._session.post(
+                f"{self._base_url}/analyze_position",
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=30)
+            ) as resp:
+                if resp.status != 200:
+                    return None
+                
+                data = await resp.json()
+                return data.get("win_rate")
         
-        while time.time() - start_time < max_wait:
-            line = self.process.stdout.readline()
-            if line:
-                response_lines.append(line.strip())
-                if "rootInfo" in line:
-                    self.process.stdin.write("\n")
-                    self.process.stdin.flush()
-                    break
-        
-        full_response = " ".join(response_lines)
-        match = re.search(r'rootInfo.*?winrate\s+([\d.]+)', full_response)
-        
-        if match:
-            return float(match.group(1))
-        
-        return None
+        except Exception:
+            return None

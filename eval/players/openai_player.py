@@ -1,97 +1,17 @@
-"""OpenAI-compatible API player for Go evaluation.
+"""OpenAI-compatible LLM player using async HTTP.
 
-Supports vLLM, OpenAI, and other OpenAI-compatible endpoints.
+Supports vLLM and other OpenAI-compatible API endpoints.
 """
 
 import json
-import urllib.request
+from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
-from pydantic import BaseModel, ValidationError, field_validator
+import aiohttp
+from pydantic import BaseModel, ValidationError
 
-from eval.players.base import Player, GTP_COLS
-
-
-class MoveResponse(BaseModel):
-    """Pydantic model for LLM move response validation."""
-    reasoning: Optional[str] = None
-    move: str
-    
-    @field_validator('move')
-    @classmethod
-    def validate_move_format(cls, v: str) -> str:
-        """Validate move is in GTP format."""
-        v = v.strip().upper()
-        
-        if v in ("PASS", "RESIGN"):
-            return v
-        
-        if len(v) < 2 or len(v) > 3:
-            raise ValueError(f"Invalid move length: {v}")
-        
-        col = v[0]
-        if col not in GTP_COLS:
-            raise ValueError(f"Invalid column: {col}")
-        
-        try:
-            row = int(v[1:])
-            if row < 1 or row > 19:
-                raise ValueError(f"Invalid row: {row}")
-        except ValueError as e:
-            raise ValueError(f"Invalid row format: {v[1:]}") from e
-        
-        return v
-
-
-def parse_json_response(response: str) -> Optional[MoveResponse]:
-    """Parse and validate JSON response from LLM."""
-    response = response.strip()
-    
-    start_idx = response.find('{')
-    end_idx = response.rfind('}')
-    
-    if start_idx == -1 or end_idx == -1 or end_idx <= start_idx:
-        return None
-    
-    json_str = response[start_idx:end_idx + 1]
-    
-    try:
-        data = json.loads(json_str)
-        return MoveResponse(**data)
-    except (json.JSONDecodeError, ValidationError):
-        return None
-
-
-def format_move_history(moves: list) -> str:
-    """Format move history for the prompt."""
-    if not moves:
-        return "(empty - you play first)"
-    return ", ".join(f"{color}:{coord}" for color, coord in moves)
-
-
-def is_deepseek_model(model_name: str) -> bool:
-    """Check if model is from DeepSeek family."""
-    model_lower = model_name.lower()
-    return any(p in model_lower for p in ["deepseek-v3", "deepseek-r1", "deepseekv3", "deepseekr1"])
-
-
-def fetch_model_name_from_api(api_base: str, api_key: str = "EMPTY") -> Optional[str]:
-    """Fetch the model name from the vLLM /v1/models endpoint."""
-    url = f"{api_base.rstrip('/')}/models"
-    headers = {"Authorization": f"Bearer {api_key}"}
-    
-    try:
-        req = urllib.request.Request(url, headers=headers, method="GET")
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            result = json.loads(resp.read().decode("utf-8"))
-        models = result.get("data", [])
-        if models:
-            return models[0].get("id")
-    except Exception as e:
-        print(f"WARNING: Failed to fetch model list from {url}: {e}")
-    
-    return None
+from eval.players.base import Player, validate_gtp_move
 
 
 # Default prompt template
@@ -115,171 +35,256 @@ Where <your_move> is in GTP coordinate format:
 Respond with ONLY the JSON object."""
 
 
+class LLMResponse(BaseModel):
+    """Expected response format from LLM."""
+    reasoning: str
+    move: str
+
+
 class OpenAIPlayer(Player):
-    """LLM player using OpenAI-compatible API (vLLM, OpenAI, etc.)."""
+    """LLM player using OpenAI-compatible API (async HTTP).
     
-    MAX_RETRIES = 5
+    Works with vLLM, OpenAI, and other compatible endpoints.
+    """
     
     def __init__(
-        self, 
-        api_base: str, 
+        self,
+        api_base: str,
         model: Optional[str] = None,
         api_key: Optional[str] = None,
-        temperature: float = 0.1, 
+        temperature: float = 0.1,
         max_tokens: int = 1024,
-        prompt_template: Optional[str] = None
+        prompt_template: Optional[str] = None,
+        name: Optional[str] = None
     ):
-        """Initialize OpenAI-compatible player.
+        """Initialize OpenAI player.
         
         Args:
-            api_base: API base URL (e.g., "http://localhost:8001/v1")
+            api_base: API base URL (e.g., "http://localhost:8002/v1")
             model: Model name (auto-detected if None)
-            api_key: API key for authentication
+            api_key: API key (optional for local vLLM)
             temperature: Sampling temperature
-            max_tokens: Maximum tokens in response
-            prompt_template: Custom prompt template (uses default if None)
+            max_tokens: Max tokens to generate
+            prompt_template: Custom prompt template
+            name: Player name
         """
         self.api_base = api_base.rstrip("/")
-        self.api_key = api_key or "EMPTY"
+        self.model = model
+        self.api_key = api_key or "dummy"
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.prompt_template = prompt_template or DEFAULT_PROMPT_TEMPLATE
         
-        # Auto-detect model name if not provided
-        if model is None:
-            detected_model = fetch_model_name_from_api(self.api_base, self.api_key)
-            assert detected_model is not None, \
-                f"Could not auto-detect model from {self.api_base}. Provide model explicitly."
-            self.model = detected_model
-            print(f"Auto-detected model: {self.model}")
-        else:
-            self.model = model
+        self._session: Optional[aiohttp.ClientSession] = None
+        self._ply = 0
         
-        super().__init__(name=self.model)
-        
-        self.use_json_response_format = is_deepseek_model(self.model)
+        super().__init__(name=name or model or "openai-player")
     
-    def _make_request(self, prompt: str) -> dict:
-        """Make API request and return the result."""
-        url = f"{self.api_base}/chat/completions"
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.api_key}"
-        }
-        data = {
-            "model": self.model,
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": self.temperature,
-            "max_tokens": self.max_tokens,
-        }
-        
-        if self.use_json_response_format:
-            data["response_format"] = {"type": "json_object"}
-        
-        req = urllib.request.Request(
-            url,
-            data=json.dumps(data).encode("utf-8"),
-            headers=headers,
-            method="POST"
-        )
-        
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            return json.loads(resp.read().decode("utf-8"))
+    @property
+    def requires_logging(self) -> bool:
+        """LLM players require logging."""
+        return True
     
-    def _build_prompt(self, move_history: list, rules: str, komi: float, color: str) -> str:
-        """Build the prompt for the LLM."""
+    async def start(self):
+        """Start the player (create HTTP session, detect model)."""
+        self._session = aiohttp.ClientSession()
+        
+        # Auto-detect model if not specified
+        if self.model is None:
+            self.model = await self._detect_model()
+            self.name = self.model or "openai-player"
+        
+        print(f"OpenAI player ready: {self.name} @ {self.api_base}")
+    
+    async def stop(self):
+        """Stop the player (close HTTP session)."""
+        if self._session is not None:
+            await self._session.close()
+            self._session = None
+    
+    async def _detect_model(self) -> Optional[str]:
+        """Auto-detect model from the API."""
+        assert self._session is not None
+        
+        try:
+            async with self._session.get(
+                f"{self.api_base}/models",
+                headers={"Authorization": f"Bearer {self.api_key}"},
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    models = data.get("data", [])
+                    if models:
+                        model_id = models[0].get("id")
+                        print(f"Auto-detected model: {model_id}")
+                        return model_id
+        except Exception as e:
+            print(f"Failed to auto-detect model: {e}")
+        
+        return None
+    
+    def reset_game(self, game_id: int = 0):
+        """Reset for a new game."""
+        super().reset_game(game_id)
+        self._ply = 0
+    
+    async def get_move(
+        self,
+        move_history: List[List[str]],
+        rules: str,
+        komi: float,
+        color: str,
+        win_rate: Optional[float] = None
+    ) -> str:
+        """Get move from LLM via API."""
+        assert self._session is not None, "Player not started"
+        
+        self._ply = len(move_history) + 1
+        
+        # Build prompt
         color_name = "Black" if color == "B" else "White"
-        history_str = format_move_history(move_history)
+        history_str = ", ".join(f"{c}:{m}" for c, m in move_history) if move_history else "none"
         
-        return self.prompt_template.format(
+        prompt = self.prompt_template.format(
             color_name=color_name,
             rules=rules,
             komi=komi,
             history_str=history_str
         )
-    
-    def _log_interaction(
-        self, 
-        prompt: str, 
-        response: str, 
-        parsed_move: str,
-        move_history: list, 
-        rules: str, 
-        komi: float, 
-        color: str,
-        reasoning: Optional[str] = None, 
-        retries: int = 0,
-        win_rate: Optional[float] = None
-    ):
-        """Log an LLM interaction to the log file."""
-        if not self._log_path:
-            return
         
-        log_entry = {
-            "game_id": self._game_id,
-            "ply": len(move_history),
-            "color": color,
-            "rules": rules,
-            "komi": komi,
-            "prompt": prompt,
-            "raw_response": response,
-            "parsed_move": parsed_move,
-            "retries": retries,
+        # Try up to 5 times
+        max_retries = 5
+        last_error = None
+        raw_response = ""
+        parsed_move = ""
+        reasoning = ""
+        
+        for attempt in range(max_retries):
+            try:
+                raw_response = await self._call_api(prompt)
+                
+                # Parse JSON response
+                response_data = self._parse_response(raw_response)
+                parsed_move = response_data.move.upper().strip()
+                reasoning = response_data.reasoning
+                
+                # Validate move
+                if validate_gtp_move(parsed_move):
+                    break
+                else:
+                    last_error = f"Invalid GTP move: {parsed_move}"
+            
+            except ValidationError as e:
+                last_error = f"JSON validation error: {e}"
+            except json.JSONDecodeError as e:
+                last_error = f"JSON parse error: {e}"
+            except Exception as e:
+                last_error = str(e)
+            
+            if attempt < max_retries - 1:
+                print(f"  Retry {attempt + 1}/{max_retries}: {last_error}")
+        
+        # Log the interaction
+        if self._log_path is not None:
+            self._log_move(prompt, raw_response, parsed_move, reasoning, win_rate, last_error)
+        
+        if not validate_gtp_move(parsed_move):
+            print(f"  LLM failed after {max_retries} attempts: {last_error}")
+            return ""
+        
+        return parsed_move
+    
+    async def _call_api(self, prompt: str) -> str:
+        """Make API call and return raw response."""
+        assert self._session is not None
+        
+        # Check if model supports JSON mode (DeepSeek)
+        is_deepseek = self.model and "deepseek" in self.model.lower()
+        
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": "You are an expert Go player."},
+                {"role": "user", "content": prompt}
+            ],
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
         }
         
-        if reasoning:
-            log_entry["reasoning"] = reasoning
-        if win_rate is not None:
-            log_entry["win_rate"] = win_rate
+        if is_deepseek:
+            payload["response_format"] = {"type": "json_object"}
+        
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.api_key}"
+        }
+        
+        async with self._session.post(
+            f"{self.api_base}/chat/completions",
+            json=payload,
+            headers=headers,
+            timeout=aiohttp.ClientTimeout(total=120)
+        ) as resp:
+            if resp.status != 200:
+                text = await resp.text()
+                raise RuntimeError(f"API error {resp.status}: {text}")
+            
+            data = await resp.json()
+            
+        choices = data.get("choices", [])
+        if not choices:
+            raise RuntimeError("No choices in API response")
+        
+        message = choices[0].get("message", {})
+        content = message.get("content", "")
+        
+        return content
+    
+    def _parse_response(self, raw_response: str) -> LLMResponse:
+        """Parse LLM response into structured format."""
+        # Try direct JSON parse
+        try:
+            data = json.loads(raw_response)
+            return LLMResponse(**data)
+        except (json.JSONDecodeError, ValidationError):
+            pass
+        
+        # Try to extract JSON from response
+        import re
+        json_match = re.search(r'\{[^{}]*"move"[^{}]*\}', raw_response, re.DOTALL)
+        if json_match:
+            data = json.loads(json_match.group())
+            return LLMResponse(**data)
+        
+        raise json.JSONDecodeError("No valid JSON found", raw_response, 0)
+    
+    def _log_move(
+        self,
+        prompt: str,
+        raw_response: str,
+        parsed_move: str,
+        reasoning: str,
+        win_rate: Optional[float],
+        error: Optional[str]
+    ):
+        """Log the move to JSONL file."""
+        if self._log_path is None:
+            return
+        
+        self._log_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        entry = {
+            "timestamp": datetime.now().isoformat(),
+            "game_id": self._current_game_id,
+            "ply": self._ply,
+            "prompt": prompt,
+            "raw_response": raw_response,
+            "reasoning": reasoning,
+            "parsed_move": parsed_move,
+            "win_rate": win_rate,
+            "error": error
+        }
         
         with open(self._log_path, "a") as f:
-            f.write(json.dumps(log_entry) + "\n")
-    
-    def get_move(
-        self, 
-        move_history: list, 
-        rules: str, 
-        komi: float, 
-        color: str,
-        win_rate: Optional[float] = None
-    ) -> str:
-        """Get move from OpenAI-compatible API with retry logic."""
-        prompt = self._build_prompt(move_history, rules, komi, color)
-        
-        last_response = ""
-        reasoning = None
-        
-        for attempt in range(self.MAX_RETRIES):
-            try:
-                result = self._make_request(prompt)
-            except Exception as e:
-                last_response = f"API_ERROR: {e}"
-                continue
-            
-            choice = result["choices"][0]
-            response_text = choice["message"]["content"]
-            last_response = response_text
-            
-            # Extract reasoning from API response if present
-            if "reasoning_content" in choice["message"]:
-                reasoning = choice["message"]["reasoning_content"]
-            
-            move_response = parse_json_response(response_text)
-            
-            if move_response is not None:
-                move = move_response.move
-                if reasoning is None and move_response.reasoning:
-                    reasoning = move_response.reasoning
-                
-                self._log_interaction(
-                    prompt, response_text, move, move_history, rules, komi, color,
-                    reasoning=reasoning, retries=attempt, win_rate=win_rate
-                )
-                return move
-        
-        # All retries exhausted
-        self._log_interaction(
-            prompt, last_response, "", move_history, rules, komi, color,
-            reasoning=reasoning, retries=self.MAX_RETRIES, win_rate=win_rate
-        )
-        return ""
+            f.write(json.dumps(entry) + "\n")

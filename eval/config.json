@@ -15,44 +15,36 @@
         "model_name": "qwen3-vl-eval",
         "games_per_level": 48,
         "promotion_threshold": 0.55,
-        "starting_elo": 1000
-      }
-    },
-    
-    "huggingface": {
-      "candidate": {
-        "type": "huggingface",
-        "model_path": "/path/to/checkpoint",
-        "device": "cuda",
-        "temperature": 0.1,
-        "max_new_tokens": 1024
-      },
-      "evaluation": {
-        "model_name": "my-hf-model-eval",
-        "games_per_level": 48,
-        "promotion_threshold": 0.55,
-        "starting_elo": 1000
+        "starting_elo": 1000,
+        "max_parallel": 4
       }
     },
     
     "katago": {
       "candidate": {
         "type": "katago",
-        "model_path": "assets/models/level_02_kata1-b10c128-s197428736-d67404019.txt.gz"
+        "model_path": "assets/models/level_02_kata1-b10c128-s197428736-d67404019.txt.gz",
+        "gpu_id": 0,
+        "port": 8100
+      },
+      "reference": {
+        "gpu_id": 1
       },
       "evaluation": {
         "model_name": "katago-level2-eval",
         "games_per_level": 48,
         "promotion_threshold": 0.55,
-        "starting_elo": 1000
+        "starting_elo": 1000,
+        "max_parallel": 4
       }
     }
   },
   
   "defaults": {
-    "katago_path": "/scratch/Projects/SPEC-SF-AISG/katago/bin/katago-cuda/katago",
-    "katago_config": "/scratch/Projects/SPEC-SF-AISG/katago/bin/katago-cuda/default_gtp.cfg",
     "manifest_path": "assets/models/manifest.json",
-    "output_dir": "data/eval"
+    "output_dir": "data/eval",
+    "candidate_gpu": 0,
+    "reference_gpu": 1,
+    "max_parallel": 4
   }
 }

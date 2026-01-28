@@ -1,14 +1,14 @@
 """Ladder evaluation logic for Go.
 
 Implements the ladder-style competition pipeline with Elo rating.
-Uses asyncio for game execution.
+Games within a level run in parallel using async I/O.
 """
 
 import asyncio
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Optional
 
 from eval.players.base import Player
 from eval.players.katago_player import KataGoPlayer
@@ -27,141 +27,137 @@ def compute_elo_update(
     return candidate_elo + k_factor * (actual - expected)
 
 
-async def play_game_async(
-    game_idx: int,
+async def play_game_with_id(
+    game_id: int,
     candidate: Player,
-    reference: KataGoPlayer,
+    reference: Player,
     rule_name: str,
     rule_string: str,
     komi: float,
     candidate_color: str,
-    verbose: bool
+    verbose: bool = False
 ) -> GameResult:
-    """Play a single game asynchronously (wrapped for asyncio)."""
-    loop = asyncio.get_event_loop()
+    """Play a single game (wrapper for parallel execution)."""
+    candidate.reset_game(game_id=game_id)
     
-    def _play():
-        candidate.reset_game(game_id=game_idx + 1)
-        return play_single_game(
-            game_id=game_idx + 1,
-            candidate=candidate,
-            reference=reference,
-            rule_name=rule_name,
-            rule_string=rule_string,
-            komi=komi,
-            candidate_color=candidate_color,
-            verbose=verbose
-        )
-    
-    return await loop.run_in_executor(None, _play)
+    return await play_single_game(
+        game_id=game_id,
+        candidate=candidate,
+        reference=reference,
+        rule_name=rule_name,
+        rule_string=rule_string,
+        komi=komi,
+        candidate_color=candidate_color,
+        verbose=verbose
+    )
 
 
 async def run_level_games(
-    variations: List[Tuple],
     candidate: Player,
-    reference: KataGoPlayer,
-    level_dir: Path,
-    verbose: bool
+    reference: Player,
+    variations: List,
+    max_parallel: int = 4,
+    verbose: bool = False
 ) -> List[GameResult]:
-    """Run all games for a level using asyncio.
-    
-    Note: Due to GTP subprocess I/O constraints, games run sequentially
-    but use asyncio for better integration with async codebases.
+    """Run all games for a level in parallel.
     
     Args:
-        variations: List of (rule_name, rule_string, komi, candidate_color)
         candidate: Candidate player
-        reference: Reference KataGo player
-        level_dir: Directory to save SGF files
-        verbose: Print detailed output
+        reference: Reference player
+        variations: List of (rule_name, rule_string, komi, candidate_color)
+        max_parallel: Max concurrent games
+        verbose: Print verbose output
     
     Returns:
-        List of GameResult objects
+        List of game results
     """
-    results = []
+    semaphore = asyncio.Semaphore(max_parallel)
     
-    for game_idx, (rule_name, rule_string, komi, candidate_color) in enumerate(variations):
-        print(f"  Game {game_idx + 1}/{len(variations)}: "
-              f"{rule_name}, komi={komi}, candidate={candidate_color}", end="", flush=True)
-        
-        result = await play_game_async(
-            game_idx, candidate, reference,
-            rule_name, rule_string, komi, candidate_color, verbose
-        )
-        
-        results.append(result)
-        
-        # Print result
-        if result.candidate_won:
-            print(f" -> WIN ({result.win_reason})")
-        elif result.winner == "draw":
-            print(" -> DRAW")
-        else:
-            print(f" -> LOSS ({result.win_reason})")
-        
-        # Save SGF
-        sgf_path = level_dir / f"game_{game_idx + 1:03d}.sgf"
-        with open(sgf_path, "w") as f:
-            f.write(result.sgf)
+    async def run_game(game_idx: int, variation: tuple) -> GameResult:
+        async with semaphore:
+            rule_name, rule_string, komi, candidate_color = variation
+            print(f"  Game {game_idx + 1}/{len(variations)}: "
+                  f"{rule_name}, komi={komi}, candidate={candidate_color}", 
+                  flush=True)
+            
+            result = await play_game_with_id(
+                game_id=game_idx + 1,
+                candidate=candidate,
+                reference=reference,
+                rule_name=rule_name,
+                rule_string=rule_string,
+                komi=komi,
+                candidate_color=candidate_color,
+                verbose=verbose
+            )
+            
+            # Print result
+            if result.candidate_won:
+                outcome = f"WIN ({result.win_reason})"
+            elif result.winner == "draw":
+                outcome = "DRAW"
+            else:
+                outcome = f"LOSS ({result.win_reason})"
+            
+            print(f"    Game {game_idx + 1} -> {outcome}", flush=True)
+            
+            return result
     
-    return results
+    # Create all tasks
+    tasks = [
+        run_game(i, var) 
+        for i, var in enumerate(variations)
+    ]
+    
+    # Run all games in parallel (limited by semaphore)
+    results = await asyncio.gather(*tasks)
+    
+    return list(results)
 
 
-def run_ladder_evaluation(
+async def run_ladder_evaluation_async(
     candidate: Player,
-    katago_path: str,
-    katago_config: str,
     manifest_path: Path,
     output_dir: Path,
     model_name: str,
     games_per_level: int = 48,
     promotion_threshold: float = 0.55,
     starting_elo: float = 1000.0,
-    verbose: bool = False
+    candidate_gpu: int = 0,
+    reference_gpu: int = 1,
+    max_parallel: int = 4,
+    verbose: bool = False,
+    max_levels: Optional[int] = None
 ) -> dict:
-    """Run the full ladder evaluation.
+    """Run the full ladder evaluation asynchronously.
     
     Args:
         candidate: The candidate player to evaluate
-        katago_path: Path to KataGo executable
-        katago_config: Path to KataGo config file
         manifest_path: Path to reference models manifest
         output_dir: Base output directory
         model_name: Name for this evaluation run
         games_per_level: Games per level
         promotion_threshold: Win rate needed for promotion
         starting_elo: Starting Elo estimate
+        candidate_gpu: GPU for candidate (if KataGo)
+        reference_gpu: GPU for reference KataGo
+        max_parallel: Max parallel games per level
         verbose: Print detailed output
+        max_levels: Maximum levels to evaluate (None = all)
     
     Returns:
         Results dictionary
     """
-    return asyncio.run(_run_ladder_evaluation_async(
-        candidate, katago_path, katago_config, manifest_path,
-        output_dir, model_name, games_per_level, promotion_threshold,
-        starting_elo, verbose
-    ))
-
-
-async def _run_ladder_evaluation_async(
-    candidate: Player,
-    katago_path: str,
-    katago_config: str,
-    manifest_path: Path,
-    output_dir: Path,
-    model_name: str,
-    games_per_level: int,
-    promotion_threshold: float,
-    starting_elo: float,
-    verbose: bool
-) -> dict:
-    """Async implementation of ladder evaluation."""
     # Load manifest
     assert manifest_path.exists(), f"Manifest not found: {manifest_path}"
     with open(manifest_path) as f:
         manifest = json.load(f)
     
     models = sorted(manifest["models"], key=lambda x: x["level"])
+    
+    # Limit levels if specified
+    if max_levels is not None:
+        models = models[:max_levels]
     
     # Setup output directory
     run_dir = output_dir / model_name
@@ -193,7 +189,7 @@ async def _run_ladder_evaluation_async(
     candidate_elo = starting_elo
     
     # Start candidate
-    candidate.start()
+    await candidate.start()
     
     try:
         for model_info in models:
@@ -216,39 +212,48 @@ async def _run_ladder_evaluation_async(
             if candidate.requires_logging:
                 candidate.set_log_path(level_dir / "llm_log.jsonl")
             
-            # Create reference KataGo
+            # Create reference KataGo player
             reference = KataGoPlayer(
-                katago_path=katago_path,
                 model_path=str(model_path),
-                config_path=katago_config,
-                name=f"reference_level_{level}",
-                log_dir="log"
+                gpu_id=reference_gpu,
+                port=8200 + level,  # Unique port per level
+                name=f"reference_level_{level}"
             )
             
-            reference.start()
+            await reference.start()
             
             try:
+                # Generate game variations
                 variations = generate_game_variations(games_per_level)
                 
-                # Run games
+                # Run all games in parallel
                 game_results = await run_level_games(
-                    variations, candidate, reference, level_dir, verbose
+                    candidate=candidate,
+                    reference=reference,
+                    variations=variations,
+                    max_parallel=max_parallel,
+                    verbose=verbose
                 )
                 
                 # Tally results
                 wins = sum(1 for r in game_results if r.candidate_won)
+                losses = sum(1 for r in game_results if not r.candidate_won and r.winner != "draw")
                 draws = sum(1 for r in game_results if r.winner == "draw")
-                losses = len(game_results) - wins - draws
                 
-                # Update Elo
+                # Update Elo for each game
                 for result in game_results:
                     if result.winner != "draw":
                         candidate_elo = compute_elo_update(
                             candidate_elo, reference_elo, result.candidate_won
                         )
+                    
+                    # Save SGF
+                    sgf_path = level_dir / f"game_{result.game_id:03d}.sgf"
+                    with open(sgf_path, "w") as f:
+                        f.write(result.sgf)
             
             finally:
-                reference.stop()
+                await reference.stop()
             
             # Compute level results
             games_played = wins + losses + draws
@@ -288,7 +293,7 @@ async def _run_ladder_evaluation_async(
                 json.dump(results, f, indent=2)
     
     finally:
-        candidate.stop()
+        await candidate.stop()
     
     # Final status
     if results["stopped_reason"] is None:
@@ -324,3 +329,34 @@ async def _run_ladder_evaluation_async(
     print(f"\nResults saved to: {run_dir}")
     
     return results
+
+
+def run_ladder_evaluation(
+    candidate: Player,
+    manifest_path: Path,
+    output_dir: Path,
+    model_name: str,
+    games_per_level: int = 48,
+    promotion_threshold: float = 0.55,
+    starting_elo: float = 1000.0,
+    candidate_gpu: int = 0,
+    reference_gpu: int = 1,
+    max_parallel: int = 4,
+    verbose: bool = False,
+    max_levels: Optional[int] = None
+) -> dict:
+    """Synchronous wrapper for run_ladder_evaluation_async."""
+    return asyncio.run(run_ladder_evaluation_async(
+        candidate=candidate,
+        manifest_path=manifest_path,
+        output_dir=output_dir,
+        model_name=model_name,
+        games_per_level=games_per_level,
+        promotion_threshold=promotion_threshold,
+        starting_elo=starting_elo,
+        candidate_gpu=candidate_gpu,
+        reference_gpu=reference_gpu,
+        max_parallel=max_parallel,
+        verbose=verbose,
+        max_levels=max_levels
+    ))

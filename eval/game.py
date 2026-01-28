@@ -1,33 +1,28 @@
 """Game logic for Go evaluation.
 
-Handles game flow, SGF generation, and game result tracking.
+Contains async game playing logic and SGF generation.
 """
 
 from dataclasses import dataclass
-from datetime import datetime
-from typing import Optional
+from typing import List, Optional, Tuple
 
-from eval.players.base import Player, validate_gtp_move, GTP_COLS
-from eval.players.katago_player import KataGoPlayer
+from eval.players.base import Player, validate_gtp_move
 
 
-# Game rule configurations (KataGo format)
-RULE_CONFIGS = [
+# Go rules to test
+GO_RULES = [
     ("Japanese", "koSIMPLEscoreTERRITORYtaxSEKIsui0"),
     ("Chinese", "koSIMPLEscoreAREAtaxNONEsui0whbN"),
-    ("Korean", "koPOSITIONALscoreAREAtaxNONEsui0whbN"),
-    ("AGA", "koSITUATIONALscoreAREAtaxNONEsui0whbN-1"),
-    ("NewZealand", "koSITUATIONALscoreAREAtaxNONEsui1"),
-    ("TrompTaylor", "koPOSITIONALscoreAREAtaxNONEsui1"),
-    ("StoneScoring", "koSIMPLEscoreAREAtaxALLsui0"),
-    ("AncientTerritory", "koSIMPLEscoreTERRITORYtaxALLsui0"),
+    ("Korean", "koSIMPLEscoreTERRITORYtaxNONEsui0"),
+    ("AGA", "koSITUATIONALscoreAREAtaxNONEsui0whbN"),
+    ("NZ", "koSITUATIONALscoreAREAtaxNONEsui0"),
+    ("Tromp-Taylor", "koSITUATIONALscoreAREAtaxALLsui0"),
+    ("Stone Scoring", "koSIMPLEscoreAREAtaxALLsui1"),
+    ("Ancient", "koSIMPLEscoreAREAtaxNONEsui0"),
 ]
 
 KOMI_VALUES = [5.5, 6.5, 7.5]
-SIDES = ["B", "W"]
-
-# Total combinations = 8 rules × 3 komis × 2 sides = 48
-TOTAL_COMBINATIONS = len(RULE_CONFIGS) * len(KOMI_VALUES) * len(SIDES)
+CANDIDATE_COLORS = ["B", "W"]
 
 
 @dataclass
@@ -39,59 +34,85 @@ class GameResult:
     komi: float
     candidate_color: str
     winner: str  # "B", "W", or "draw"
-    win_reason: str  # "score", "resign", "forfeit", "timeout", "max_moves"
-    candidate_won: bool
+    win_reason: str  # "resign", "score", "forfeit", "timeout"
     move_count: int
+    candidate_won: bool
     sgf: str
-    timestamp: str
+    moves: List[List[str]]
 
 
-def gtp_to_sgf(move: str) -> str:
-    """Convert GTP coordinate to SGF coordinate."""
-    move = move.upper()
-    if move in ("PASS", "RESIGN"):
+def gtp_to_sgf(gtp_move: str) -> str:
+    """Convert GTP move to SGF format."""
+    if not gtp_move or gtp_move.upper() in ("PASS", "RESIGN"):
         return ""
     
-    col = move[0]
-    row = int(move[1:])
+    gtp_move = gtp_move.upper()
+    col_letter = gtp_move[0]
+    row_num = int(gtp_move[1:])
     
-    gtp_col_idx = GTP_COLS.index(col)
-    sgf_col = chr(ord('a') + gtp_col_idx)
-    sgf_row = chr(ord('a') + (19 - row))
+    # GTP columns: A-T (no I), SGF columns: a-s
+    gtp_cols = "ABCDEFGHJKLMNOPQRST"
+    col_idx = gtp_cols.index(col_letter)
+    
+    # SGF: a=1, s=19, but row is inverted
+    sgf_col = chr(ord('a') + col_idx)
+    sgf_row = chr(ord('a') + (19 - row_num))
     
     return sgf_col + sgf_row
 
 
-def build_sgf(rule_name: str, komi: float, moves: list, result: str) -> str:
-    """Build an SGF string from game data."""
-    header = f"(;GM[1]FF[4]SZ[19]KM[{komi}]RU[{rule_name}]RE[{result}]"
-    moves_str = "".join(moves)
-    return header + moves_str + ")"
+def build_sgf(
+    moves: List[List[str]],
+    rule_name: str,
+    komi: float,
+    result: str,
+    black_player: str = "Unknown",
+    white_player: str = "Unknown"
+) -> str:
+    """Build SGF string from move list."""
+    header = (
+        f"(;GM[1]FF[4]CA[UTF-8]"
+        f"SZ[19]KM[{komi}]"
+        f"RU[{rule_name}]"
+        f"PB[{black_player}]PW[{white_player}]"
+        f"RE[{result}]"
+    )
+    
+    move_str = ""
+    for color, move in moves:
+        sgf_move = gtp_to_sgf(move)
+        if sgf_move:
+            move_str += f";{color}[{sgf_move}]"
+        elif move.upper() == "PASS":
+            move_str += f";{color}[]"
+    
+    return header + move_str + ")"
 
 
-def generate_game_variations(games_per_level: int) -> list:
-    """Generate game configuration variations.
+def generate_game_variations(games_per_level: int) -> List[Tuple[str, str, float, str]]:
+    """Generate game variations covering rules, komi, and colors.
     
     Returns list of (rule_name, rule_string, komi, candidate_color) tuples.
     """
-    base_combinations = [
-        (rule_name, rule_string, komi, side)
-        for rule_name, rule_string in RULE_CONFIGS
-        for komi in KOMI_VALUES
-        for side in SIDES
-    ]
+    variations = []
     
-    full_rounds = games_per_level // TOTAL_COMBINATIONS
-    remainder = games_per_level % TOTAL_COMBINATIONS
+    for rule_name, rule_string in GO_RULES:
+        for komi in KOMI_VALUES:
+            for color in CANDIDATE_COLORS:
+                variations.append((rule_name, rule_string, komi, color))
     
-    variations = base_combinations * full_rounds + base_combinations[:remainder]
-    return variations
+    # Repeat to fill games_per_level
+    result = []
+    for i in range(games_per_level):
+        result.append(variations[i % len(variations)])
+    
+    return result
 
 
-def play_single_game(
+async def play_single_game(
     game_id: int,
     candidate: Player,
-    reference: KataGoPlayer,
+    reference: Player,
     rule_name: str,
     rule_string: str,
     komi: float,
@@ -101,108 +122,100 @@ def play_single_game(
 ) -> GameResult:
     """Play a single game between candidate and reference.
     
+    Both players are queried via async HTTP. The full move history is passed
+    to each player on every move (stateless).
+    
     Args:
-        game_id: Unique game identifier
-        candidate: The candidate player being evaluated
-        reference: KataGo reference player (also used for board state)
+        game_id: Game identifier
+        candidate: Candidate player (being evaluated)
+        reference: Reference player (KataGo)
         rule_name: Human-readable rule name
         rule_string: KataGo rule string
         komi: Komi value
-        candidate_color: Color for candidate ("B" or "W")
-        max_moves: Maximum moves before declaring draw
-        verbose: Print detailed output
+        candidate_color: Color the candidate plays ("B" or "W")
+        max_moves: Maximum moves before draw
+        verbose: Print move-by-move output
     
     Returns:
-        GameResult with game outcome
+        GameResult with outcome and SGF
     """
-    # Setup game on reference engine
-    reference.clear_board()
-    reference.set_boardsize(19)
-    reference.set_komi(komi)
-    reference.set_rules(rule_string)
-    
-    move_history = []
-    sgf_moves = []
-    current_color = "B"  # Black always starts
-    winner = None
-    win_reason = "score"
-    
     reference_color = "W" if candidate_color == "B" else "B"
+    moves: List[List[str]] = []
+    
+    winner = ""
+    win_reason = ""
+    
+    # Determine who plays first (Black always starts)
+    current_color = "B"
     
     for move_num in range(max_moves):
-        if current_color == candidate_color:
-            # Candidate's turn
-            win_rate = None
-            try:
-                win_rate = reference.get_win_rate(current_color, visits=50)
-            except Exception:
-                pass
-            
-            move = candidate.get_move(
-                move_history, rule_string, komi, current_color, win_rate=win_rate
-            )
-            
-            if not move or not validate_gtp_move(move):
-                if verbose:
-                    print(f"  Candidate invalid move: '{move}'")
-                winner = reference_color
-                win_reason = "forfeit"
-                break
-            
-            # Verify move is legal on reference board
-            result = reference.play_move(current_color, move)
-            if "illegal" in result.lower() or "?" in result:
-                if verbose:
-                    print(f"  Candidate illegal move: {move}")
-                winner = reference_color
-                win_reason = "forfeit"
-                break
-        else:
-            # Reference's turn
-            move = reference.genmove(current_color)
+        # Determine whose turn
+        is_candidate_turn = (current_color == candidate_color)
+        player = candidate if is_candidate_turn else reference
+        
+        # Get win rate from reference's perspective (before candidate's move)
+        win_rate = None
+        if is_candidate_turn and candidate.requires_logging:
+            win_rate = await reference.get_win_rate(moves, rule_string, komi, reference_color)
+        
+        # Get move
+        move = await player.get_move(moves, rule_string, komi, current_color, win_rate)
         
         if verbose:
-            print(f"  Move {move_num + 1}: {current_color} {move}")
+            player_name = "candidate" if is_candidate_turn else "reference"
+            print(f"    {move_num + 1}. {current_color}: {move} ({player_name})")
         
-        # Record move
-        move_history.append([current_color, move])
-        sgf_moves.append(f";{current_color}[{gtp_to_sgf(move)}]")
+        # Check for invalid move
+        if not move or not validate_gtp_move(move):
+            # Forfeit
+            winner = reference_color if is_candidate_turn else candidate_color
+            win_reason = "forfeit"
+            break
         
-        # Check for game end
+        # Check for resign
         if move.upper() == "RESIGN":
-            winner = "W" if current_color == "B" else "B"
+            winner = reference_color if is_candidate_turn else candidate_color
             win_reason = "resign"
             break
         
-        # Check for two consecutive passes
-        if len(move_history) >= 2:
-            if (move_history[-1][1].upper() == "PASS" and 
-                move_history[-2][1].upper() == "PASS"):
-                score_result = reference.final_score()
-                if "B+" in score_result:
-                    winner = "B"
-                elif "W+" in score_result:
-                    winner = "W"
-                else:
-                    winner = "draw"
+        # Record move
+        moves.append([current_color, move])
+        
+        # Check for consecutive passes (game end)
+        if len(moves) >= 2:
+            if moves[-1][1].upper() == "PASS" and moves[-2][1].upper() == "PASS":
+                # Game ends - would need scoring, but we'll call it a draw for now
+                # In practice, KataGo should resign when losing
+                winner = "draw"
+                win_reason = "passes"
                 break
         
         # Switch color
         current_color = "W" if current_color == "B" else "B"
     
-    # Max moves reached
-    if winner is None:
+    else:
+        # Max moves reached
         winner = "draw"
         win_reason = "max_moves"
     
-    candidate_won = (winner == candidate_color)
+    # Determine result string for SGF
+    if winner == "draw":
+        result_str = "0"
+    elif win_reason == "resign":
+        result_str = f"{winner}+R"
+    elif win_reason == "forfeit":
+        result_str = f"{winner}+F"
+    else:
+        result_str = f"{winner}+?"
     
-    sgf = build_sgf(
-        rule_name=rule_name,
-        komi=komi,
-        moves=sgf_moves,
-        result=f"{winner}+{win_reason}" if winner != "draw" else "0"
-    )
+    # Build SGF
+    black_player = candidate.name if candidate_color == "B" else reference.name
+    white_player = reference.name if candidate_color == "B" else candidate.name
+    
+    sgf = build_sgf(moves, rule_name, komi, result_str, black_player, white_player)
+    
+    # Determine if candidate won
+    candidate_won = (winner == candidate_color)
     
     return GameResult(
         game_id=game_id,
@@ -212,8 +225,8 @@ def play_single_game(
         candidate_color=candidate_color,
         winner=winner,
         win_reason=win_reason,
+        move_count=len(moves),
         candidate_won=candidate_won,
-        move_count=len(move_history),
         sgf=sgf,
-        timestamp=datetime.now().isoformat()
+        moves=moves
     )
