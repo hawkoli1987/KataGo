@@ -114,8 +114,5 @@ training:
     r_legal_weight: 1.0     # Weight for legal move reward (0 or -1)
   
   # Offline training environment configuration
-  offline_env:
-    board_size: "19x19"  # Use 19x19 data for training
-    train_file: "19x19/train.jsonl"  # Training split file (relative to position_dir/move_dir)
-    test_file: "19x19/test.jsonl"    # Validation split file (relative to position_dir/move_dir)
-    # Note: position_dir, move_dir, and output_dir are inherited from data section
+  # Note: All paths (position_dir, move_dir, preprocessed_dir) are defined in data section
+  offline_env: {}

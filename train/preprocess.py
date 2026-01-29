@@ -269,23 +269,18 @@ def main() -> int:
         print(f"TEST MODE: Limiting to {args.limit} rows per split")
     print("=" * 60)
     
-    # Load configuration
+    # Load configuration - use data section as single source of truth
     config = load_config()
     data_cfg = config.get("data", {})
-    training_cfg = config.get("training", {})
-    offline_cfg = training_cfg.get("offline_env", {})
     
-    # Use data section directly (already includes board size)
+    # Use data section directly (already includes board size in path)
     position_dir = REPO_ROOT / data_cfg.get("position_dir", "data/positions/19x19")
     move_dir = REPO_ROOT / data_cfg.get("move_dir", "data/moves/19x19")
-    
-    # Get file names from offline_env (relative to position_dir/move_dir)
-    board_size = offline_cfg.get("board_size", "19x19")
-    train_file = offline_cfg.get("train_file", f"{board_size}/train.jsonl")
-    test_file = offline_cfg.get("test_file", f"{board_size}/test.jsonl")
-    
-    # Use preprocessed_dir from data section (already includes board size)
     output_dir = REPO_ROOT / data_cfg.get("preprocessed_dir", "data/RL/katago_offline/19x19")
+    
+    # File names are always train.jsonl and test.jsonl (no board size prefix needed)
+    train_file = "train.jsonl"
+    test_file = "test.jsonl"
     
     # Load prompt template
     prompts = load_prompts()
@@ -295,16 +290,11 @@ def main() -> int:
         print("ERROR: 'go_move' template not found in prompts.json")
         return 1
     
-    # Resolve file paths
-    # Since position_dir and move_dir already include board_size, use train_file/test_file directly
-    # train_file/test_file are like "19x19/train.jsonl", so we need just the filename
-    train_filename = train_file.split("/")[-1] if "/" in train_file else train_file
-    test_filename = test_file.split("/")[-1] if "/" in test_file else test_file
-    
-    position_train_file = position_dir / train_filename
-    position_test_file = position_dir / test_filename
-    move_train_file = move_dir / train_filename
-    move_test_file = move_dir / test_filename
+    # Resolve file paths (position_dir and move_dir already include board size)
+    position_train_file = position_dir / train_file
+    position_test_file = position_dir / test_file
+    move_train_file = move_dir / train_file
+    move_test_file = move_dir / test_file
     
     # Verify files exist
     for file_path, name in [
