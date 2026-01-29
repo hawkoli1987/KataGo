@@ -32,8 +32,9 @@ servers:
 # =============================================================================
 data:
   sgf_dir: data/raw_sgfs/kata1-b28c512nbt-s8209287936-d4596492266
-  position_dir: data/positions
-  move_dir: data/moves
+  position_dir: data/positions/19x19
+  move_dir: data/moves/19x19
+  limit: 1000
 
 # =============================================================================
 # KataGo Engine Configuration

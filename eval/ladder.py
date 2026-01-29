@@ -283,20 +283,17 @@ async def run_ladder_evaluation_async(
     games_dir = run_dir / "games"
     games_dir.mkdir(exist_ok=True)
     
-    # Save config
-    config = {
-        "model_name": model_name,
-        "candidate_name": candidate.name,
-        "games_per_level": games_per_level,
-        "promotion_threshold": promotion_threshold,
-        "starting_elo": starting_elo,
-        "max_moves_per_game": max_moves_per_game,
-        "timestamp": datetime.now().isoformat()
-    }
-    with open(run_dir / "config.json", "w") as f:
-        json.dump(config, f, indent=2)
-    
+    # Initialize results with config merged in
     results = {
+        "config": {
+            "model_name": model_name,
+            "candidate_name": candidate.name,
+            "games_per_level": games_per_level,
+            "promotion_threshold": promotion_threshold,
+            "starting_elo": starting_elo,
+            "max_moves_per_game": max_moves_per_game,
+            "timestamp": datetime.now().isoformat()
+        },
         "candidate": {"model_name": model_name, "candidate_name": candidate.name},
         "levels": [],
         "final_elo": starting_elo,
@@ -328,8 +325,11 @@ async def run_ladder_evaluation_async(
             level_dir.mkdir(exist_ok=True)
             
             # Set log path for candidate if it supports logging
+            # llm_log.jsonl will be saved in games/level_XX/llm_log.jsonl
             if candidate.requires_logging:
-                candidate.set_log_path(level_dir / "llm_log.jsonl")
+                log_path = level_dir / "llm_log.jsonl"
+                candidate.set_log_path(log_path)
+                print(f"  LLM log will be saved to: {log_path}")
             
             # Restart reference server with level-specific model
             ref_endpoint = restart_reference_server(str(model_path))
@@ -361,7 +361,8 @@ async def run_ladder_evaluation_async(
                 losses = sum(1 for r in game_results if not r.candidate_won and r.winner != "draw")
                 draws = sum(1 for r in game_results if r.winner == "draw")
                 
-                # Update Elo for each game
+                # Update Elo for each game and collect game details
+                level_games = []
                 for result in game_results:
                     if result.winner != "draw":
                         candidate_elo = compute_elo_update(
@@ -372,6 +373,24 @@ async def run_ladder_evaluation_async(
                     sgf_path = level_dir / f"game_{result.game_id:03d}.sgf"
                     with open(sgf_path, "w") as f:
                         f.write(result.sgf)
+                    
+                    # Collect game details for summary
+                    level_games.append({
+                        "game_id": result.game_id,
+                        "game_history": result.moves,  # Entire move history
+                        "result": {
+                            "winner": result.winner,
+                            "win_reason": result.win_reason,
+                            "move_count": result.move_count,
+                            "candidate_won": result.candidate_won
+                        },
+                        "game_config": {
+                            "rule_name": result.rule_name,
+                            "rule_string": result.rule_string,
+                            "komi": result.komi,
+                            "candidate_color": result.candidate_color
+                        }
+                    })
             
             finally:
                 await reference.stop()
@@ -383,6 +402,7 @@ async def run_ladder_evaluation_async(
             
             results["levels"].append({
                 "level": level,
+                "candidate_model": candidate.name,
                 "reference_model": reference_model,
                 "reference_elo": reference_elo,
                 "games_played": games_played,
@@ -391,7 +411,8 @@ async def run_ladder_evaluation_async(
                 "draws": draws,
                 "win_rate": win_rate,
                 "promoted": promoted,
-                "candidate_elo_after": candidate_elo
+                "candidate_elo_after": candidate_elo,
+                "games": level_games  # Per-game details with full history
             })
             results["total_games"] += games_played
             results["highest_level"] = level
@@ -409,9 +430,41 @@ async def run_ladder_evaluation_async(
                 results["stopped_reason"] = "win_rate_below_threshold"
                 break
             
-            # Save intermediate results
+            # Save intermediate results (same format as final)
+            results_json = {
+                "candidate_model": candidate.name,
+                "promotion_result": {
+                    "final_elo": candidate_elo,
+                    "highest_level": level,
+                    "total_games": results["total_games"],
+                    "stopped_reason": None
+                },
+                "levels": []
+            }
+            
+            for lev_data in results["levels"]:
+                level_summary = {
+                    "level": lev_data["level"],
+                    "candidate_model": lev_data["candidate_model"],
+                    "reference_model": lev_data["reference_model"],
+                    "wins": lev_data["wins"],
+                    "losses": lev_data["losses"],
+                    "draws": lev_data["draws"],
+                    "promoted": lev_data["promoted"],
+                    "games": []
+                }
+                
+                for game in lev_data.get("games", []):
+                    level_summary["games"].append({
+                        "game_id": game["game_id"],
+                        "game_history": game["game_history"],
+                        "result": game["result"]
+                    })
+                
+                results_json["levels"].append(level_summary)
+            
             with open(run_dir / "results.json", "w") as f:
-                json.dump(results, f, indent=2)
+                json.dump(results_json, f, indent=2)
     
     finally:
         await candidate.stop()
@@ -423,20 +476,52 @@ async def run_ladder_evaluation_async(
         else:
             results["stopped_reason"] = "unknown"
     
-    # Save final results
-    with open(run_dir / "results.json", "w") as f:
-        json.dump(results, f, indent=2)
-    
-    with open(run_dir / "summary.json", "w") as f:
-        json.dump({
-            "model_name": model_name,
-            "candidate_name": candidate.name,
+    # Save results.json with requested format (simplified summary)
+    results_json = {
+        "candidate_model": candidate.name,
+        "promotion_result": {
             "final_elo": results["final_elo"],
             "highest_level": results["highest_level"],
             "total_games": results["total_games"],
-            "stopped_reason": results["stopped_reason"],
-            "timestamp": datetime.now().isoformat()
-        }, f, indent=2)
+            "stopped_reason": results["stopped_reason"]
+        },
+        "levels": []
+    }
+    
+    for level_data in results["levels"]:
+        level_summary = {
+            "level": level_data["level"],
+            "candidate_model": level_data["candidate_model"],
+            "reference_model": level_data["reference_model"],
+            "wins": level_data["wins"],
+            "losses": level_data["losses"],
+            "draws": level_data["draws"],
+            "promoted": level_data["promoted"],
+            "games": []
+        }
+        
+        # Add game history and results for each game
+        for game in level_data.get("games", []):
+            level_summary["games"].append({
+                "game_id": game["game_id"],
+                "game_history": game["game_history"],  # Entire move history
+                "result": game["result"]  # Winner, win_reason, move_count, candidate_won
+            })
+        
+        results_json["levels"].append(level_summary)
+    
+    # Save results.json (ensure directory exists)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    results_path = run_dir / "results.json"
+    try:
+        with open(results_path, "w") as f:
+            json.dump(results_json, f, indent=2)
+        print(f"\nResults saved to: {run_dir}")
+        print(f"  - results.json: Evaluation summary with game history and results")
+    except Exception as e:
+        print(f"\nERROR: Failed to save results.json: {e}")
+        import traceback
+        traceback.print_exc()
     
     print(f"\n{'='*60}")
     print("FINAL SUMMARY")
@@ -448,6 +533,10 @@ async def run_ladder_evaluation_async(
     print(f"Total Games: {results['total_games']}")
     print(f"Stopped: {results['stopped_reason']}")
     print(f"\nResults saved to: {run_dir}")
+    print(f"  - results.json: Evaluation summary with game history and results")
+    if candidate.requires_logging:
+        print(f"  - games/level_XX/llm_log.jsonl: LLM interaction logs (one per level)")
+    print(f"  - games/level_XX/game_XXX.sgf: Game records (one per game)")
     
     return results
 

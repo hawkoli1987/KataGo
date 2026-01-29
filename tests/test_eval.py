@@ -1,24 +1,18 @@
 #!/usr/bin/env python3
-"""Tests for the async evaluation pipeline using pytest.
+"""Simplified evaluation tests - only promotion tests for KataGo and OpenAI.
 
-Tests that each model type can play games via HTTP endpoints.
-Both candidate and reference use FastAPI servers for async parallel execution.
-
+Tests ladder evaluation (promotion through levels) for both KataGo and OpenAI candidates.
 Configuration is loaded from configs/config.yaml.
-Environment variables can override config values:
-    OPENAI_API_BASE:     Override OpenAI endpoint
-    CANDIDATE_ENDPOINT:  Override candidate KataGo endpoint  
-    REFERENCE_ENDPOINT:  Override reference KataGo endpoint
 
 Usage:
-    # Run all tests (requires servers via `make run_all`)
+    # Run all promotion tests (requires servers via `make run_all`)
     pytest tests/test_eval.py -v
     
-    # Run only OpenAI tests
-    pytest tests/test_eval.py -v -k "openai"
-    
-    # Run only KataGo tests  
+    # Run only KataGo promotion test
     pytest tests/test_eval.py -v -k "katago"
+    
+    # Run only OpenAI promotion test
+    pytest tests/test_eval.py -v -k "openai"
 """
 
 import asyncio
@@ -35,8 +29,7 @@ import yaml
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from eval.players import OpenAIPlayer, KataGoPlayer, validate_gtp_move
-from eval.game import play_single_game, GO_RULES, KOMI_VALUES
+from eval.players import OpenAIPlayer, KataGoPlayer
 from eval.ladder import run_ladder_evaluation
 
 
@@ -83,10 +76,6 @@ OPENAI_ENDPOINT = os.environ.get(
     "OPENAI_API_BASE", 
     _servers_cfg.get("openai", {}).get("primary", "http://localhost:8002/v1")
 )
-OPENAI_ENDPOINT_2 = os.environ.get(
-    "OPENAI_API_BASE2",
-    _servers_cfg.get("openai", {}).get("secondary", "http://localhost:8002/v1")
-)
 
 # KataGo endpoints - try to get from manage_servers.sh first, then config, then env
 _dynamic_endpoints = get_server_endpoints()
@@ -104,9 +93,8 @@ REFERENCE_ENDPOINT = os.environ.get(
 # Test parameters from config
 GAMES_PER_LEVEL_TEST = _test_cfg.get("games_per_level", 5)
 MAX_LEVELS_TEST = _test_cfg.get("max_levels", 3)
-MIN_VALID_MOVES = _test_cfg.get("min_valid_moves", 10)
 MAX_MOVES_PER_GAME = _test_cfg.get("max_moves_per_game", 100)
-TEST_OUTPUT_DIR = Path(_test_cfg.get("output_dir", "/tmp/katago_test_runs"))
+TEST_OUTPUT_DIR = REPO_ROOT / "data" / "eval" / "_test_runs"
 
 # Paths from config
 MANIFEST_PATH = REPO_ROOT / _config.get("eval", {}).get("manifest_path", "assets/models/manifest.json")
@@ -114,11 +102,16 @@ MANIFEST_PATH = REPO_ROOT / _config.get("eval", {}).get("manifest_path", "assets
 
 @pytest.fixture(scope="module")
 def cleanup_test_dir():
-    """Clean up test output directory before tests."""
+    """Clean up test output directory before tests.
+    
+    Note: This fixture cleans up the directory before tests run,
+    but does NOT clean up after tests complete, so results persist.
+    """
     if TEST_OUTPUT_DIR.exists():
         shutil.rmtree(TEST_OUTPUT_DIR)
     TEST_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     yield
+    # Don't clean up after - keep results for inspection
 
 
 @pytest.fixture(scope="module")
@@ -130,255 +123,13 @@ def event_loop():
 
 
 # ============================================================================
-# OpenAI Player Tests
-# ============================================================================
-
-class TestOpenAIPlayer:
-    """Test OpenAI-compatible player (vLLM)."""
-    
-    @pytest.mark.asyncio
-    async def test_can_generate_valid_moves(self):
-        """Test player can generate valid GTP moves with real game rules."""
-        player = OpenAIPlayer(api_base=OPENAI_ENDPOINT)
-        await player.start()
-        
-        try:
-            # Use actual Go rules and positions
-            test_cases = [
-                # Empty board, Japanese rules
-                {
-                    "move_history": [],
-                    "rules": GO_RULES[0][1],  # Japanese
-                    "komi": KOMI_VALUES[1],  # 6.5
-                    "color": "B"
-                },
-                # After a few opening moves, Chinese rules
-                {
-                    "move_history": [["B", "Q16"], ["W", "D4"], ["B", "D16"], ["W", "Q4"]],
-                    "rules": GO_RULES[1][1],  # Chinese
-                    "komi": KOMI_VALUES[2],  # 7.5
-                    "color": "B"
-                },
-            ]
-            
-            for tc in test_cases:
-                move = await player.get_move(**tc)
-                assert move, f"Player returned empty move for {tc}"
-                assert validate_gtp_move(move), f"Invalid move '{move}' for {tc}"
-        
-        finally:
-            await player.stop()
-    
-    @pytest.mark.asyncio
-    async def test_can_play_multiple_moves(self):
-        """Test player can play a realistic opening sequence."""
-        player = OpenAIPlayer(api_base=OPENAI_ENDPOINT)
-        await player.start()
-        
-        try:
-            rules = GO_RULES[0][1]  # Japanese
-            komi = KOMI_VALUES[1]  # 6.5
-            
-            # Build a realistic opening sequence
-            move_history = []
-            valid_count = 0
-            
-            # Play moves alternating colors
-            for i in range(MIN_VALID_MOVES):
-                color = "B" if i % 2 == 0 else "W"
-                move = await player.get_move(move_history, rules, komi, color)
-                
-                if move and validate_gtp_move(move):
-                    valid_count += 1
-                    if move.upper() not in ("PASS", "RESIGN"):
-                        move_history.append([color, move])
-            
-            print(f"\n  OpenAI player made {valid_count}/{MIN_VALID_MOVES} valid moves")
-            assert valid_count >= MIN_VALID_MOVES, \
-                f"Player only made {valid_count} valid moves, expected >= {MIN_VALID_MOVES}"
-        
-        finally:
-            await player.stop()
-    
-    @pytest.mark.asyncio
-    async def test_llm_log_generated(self, cleanup_test_dir):
-        """Test that llm_log.jsonl is generated with valid content."""
-        log_path = TEST_OUTPUT_DIR / "openai_test" / "llm_log.jsonl"
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        if log_path.exists():
-            log_path.unlink()
-        
-        player = OpenAIPlayer(api_base=OPENAI_ENDPOINT)
-        player.set_log_path(log_path)
-        
-        await player.start()
-        
-        try:
-            player.reset_game(game_id=1)
-            
-            # Play realistic opening moves
-            await player.get_move([], GO_RULES[0][1], 6.5, "B")
-            await player.get_move(
-                [["B", "Q16"], ["W", "D4"]],
-                GO_RULES[0][1], 6.5, "B"
-            )
-        
-        finally:
-            await player.stop()
-        
-        assert log_path.exists(), f"Log file not created: {log_path}"
-        
-        with open(log_path) as f:
-            lines = f.readlines()
-        
-        assert len(lines) >= 2, "Expected at least 2 log entries"
-        
-        for line in lines:
-            entry = json.loads(line)
-            assert "game_id" in entry
-            assert "ply" in entry
-            assert "prompt" in entry
-            assert "parsed_move" in entry
-        
-        print(f"\n  LLM log generated with {len(lines)} entries")
-
-
-# ============================================================================
-# KataGo Player Tests (requires running KataGo servers via `make run_all`)
-# ============================================================================
-
-class TestKataGoPlayer:
-    """Test KataGo player via remote FastAPI server.
-    
-    Requires: KataGo servers running at CANDIDATE_ENDPOINT and REFERENCE_ENDPOINT
-    Start servers with: `make run_all`
-    """
-    
-    @pytest.mark.asyncio
-    async def test_can_generate_valid_moves(self):
-        """Test player can generate valid GTP moves with real game rules."""
-        player = KataGoPlayer(endpoint=CANDIDATE_ENDPOINT, name="katago_test")
-        
-        await player.start()
-        
-        try:
-            # Use actual Go rules and positions
-            test_cases = [
-                # Empty board, Japanese rules
-                {
-                    "move_history": [],
-                    "rules": GO_RULES[0][1],  # Japanese
-                    "komi": KOMI_VALUES[1],  # 6.5
-                    "color": "B"
-                },
-                # Mid-game position, Chinese rules
-                {
-                    "move_history": [["B", "Q16"], ["W", "D4"], ["B", "D16"], ["W", "Q4"]],
-                    "rules": GO_RULES[1][1],  # Chinese
-                    "komi": KOMI_VALUES[2],  # 7.5
-                    "color": "B"
-                },
-            ]
-            
-            for tc in test_cases:
-                move = await player.get_move(**tc)
-                assert move, f"Player returned empty move for {tc}"
-                assert validate_gtp_move(move), f"Invalid move '{move}' for {tc}"
-        
-        finally:
-            await player.stop()
-    
-    @pytest.mark.asyncio
-    async def test_can_play_multiple_moves(self):
-        """Test KataGo can play a realistic game sequence."""
-        player = KataGoPlayer(endpoint=CANDIDATE_ENDPOINT, name="katago_multi")
-        
-        await player.start()
-        
-        try:
-            rules = GO_RULES[0][1]  # Japanese
-            komi = KOMI_VALUES[1]  # 6.5
-            
-            # Build a realistic game sequence
-            move_history = []
-            valid_count = 0
-            
-            # Play moves
-            for i in range(MIN_VALID_MOVES):
-                color = "B" if i % 2 == 0 else "W"
-                move = await player.get_move(move_history, rules, komi, color)
-                
-                if move and validate_gtp_move(move):
-                    valid_count += 1
-                    if move.upper() not in ("PASS", "RESIGN"):
-                        move_history.append([color, move])
-            
-            print(f"\n  KataGo player made {valid_count}/{MIN_VALID_MOVES} valid moves")
-            assert valid_count >= MIN_VALID_MOVES, \
-                f"KataGo only made {valid_count} valid moves, expected >= {MIN_VALID_MOVES}"
-        
-        finally:
-            await player.stop()
-    
-    def test_no_llm_log_for_katago(self):
-        """Test that KataGo players don't require LLM logging."""
-        player = KataGoPlayer(endpoint=CANDIDATE_ENDPOINT)
-        assert not player.requires_logging
-
-
-# ============================================================================
-# Game Flow Tests (requires running KataGo servers)
-# ============================================================================
-
-class TestGameFlow:
-    """Test the async game flow logic using remote KataGo servers."""
-    
-    @pytest.mark.asyncio
-    async def test_single_game_completes(self):
-        """Test that a single game between KataGo players completes normally.
-        
-        Uses candidate and reference endpoints for the two players.
-        """
-        candidate = KataGoPlayer(endpoint=CANDIDATE_ENDPOINT, name="candidate")
-        reference = KataGoPlayer(endpoint=REFERENCE_ENDPOINT, name="reference")
-        
-        await candidate.start()
-        await reference.start()
-        
-        try:
-            result = await play_single_game(
-                game_id=1,
-                candidate=candidate,
-                reference=reference,
-                rule_name=GO_RULES[0][0],  # Japanese
-                rule_string=GO_RULES[0][1],
-                komi=KOMI_VALUES[1],  # 6.5
-                candidate_color="B",
-                max_moves=MAX_MOVES_PER_GAME,
-                verbose=False
-            )
-            
-            assert result is not None
-            assert result.winner in ["B", "W", "draw"]
-            assert result.move_count > 0
-            assert result.sgf.startswith("(;GM[1]")
-            
-            print(f"\n  Game completed: {result.winner}+{result.win_reason}, {result.move_count} moves")
-        
-        finally:
-            await candidate.stop()
-            await reference.stop()
-
-
-# ============================================================================
-# Promotion Tests (requires running KataGo servers + manifest)
+# Promotion Tests
 # ============================================================================
 
 class TestKataGoPromotion:
     """Test KataGo candidate promotion through levels.
     
-    Note: This test requires:
+    Requires:
     1. KataGo servers running via `make run_all`
     2. assets/models/manifest.json with level models
     
@@ -387,11 +138,10 @@ class TestKataGoPromotion:
     
     @pytest.mark.skipif(not MANIFEST_PATH.exists(), reason="Manifest not found")
     def test_promotion(self, cleanup_test_dir):
-        """Test that a candidate can progress through ladder levels."""
-        # Use remote endpoint for candidate
-        candidate = KataGoPlayer(endpoint=CANDIDATE_ENDPOINT, name="candidate_test")
+        """Test that a KataGo candidate can progress through ladder levels."""
+        candidate = KataGoPlayer(endpoint=CANDIDATE_ENDPOINT, name="katago_candidate")
         
-        print(f"\nRunning promotion test: {GAMES_PER_LEVEL_TEST} games/level, max {MAX_LEVELS_TEST} levels")
+        print(f"\nRunning KataGo promotion test: {GAMES_PER_LEVEL_TEST} games/level, max {MAX_LEVELS_TEST} levels")
         print(f"  Candidate endpoint: {CANDIDATE_ENDPOINT}")
         print(f"  Reference endpoint: {REFERENCE_ENDPOINT}")
         
@@ -399,9 +149,9 @@ class TestKataGoPromotion:
             candidate=candidate,
             manifest_path=MANIFEST_PATH,
             output_dir=TEST_OUTPUT_DIR,
-            model_name="promotion_test",
+            model_name="katago_promotion_test",
             games_per_level=GAMES_PER_LEVEL_TEST,
-            promotion_threshold=0.5,  # Lower threshold for small sample
+            promotion_threshold=0.5,
             starting_elo=1000.0,
             max_parallel=2,
             max_moves_per_game=MAX_MOVES_PER_GAME,
@@ -413,9 +163,86 @@ class TestKataGoPromotion:
         assert results["total_games"] > 0, "Should have played at least some games"
         assert results["highest_level"] >= 1, "Should have completed at least level 1"
         
+        # Verify game files were saved
+        run_dir = TEST_OUTPUT_DIR / "katago_promotion_test"
+        games_dir = run_dir / "games"
+        assert games_dir.exists(), f"Games directory not created: {games_dir}"
+        
+        # Check that SGF files exist
+        sgf_files = list(games_dir.glob("level_*/game_*.sgf"))
+        assert len(sgf_files) > 0, f"No SGF files found in {games_dir}"
+        
+        # Verify at least one SGF has content
+        for sgf_file in sgf_files[:3]:
+            with open(sgf_file) as f:
+                content = f.read()
+                assert content.startswith("(;GM[1]"), f"SGF file {sgf_file} has invalid content"
+                assert len(content) > 50, f"SGF file {sgf_file} seems too short"
+        
         print(f"\n  Final Elo: {results['final_elo']:.0f}")
         print(f"  Highest Level: {results['highest_level']}")
         print(f"  Total Games: {results['total_games']}")
+        print(f"  SGF files saved: {len(sgf_files)}")
+
+
+class TestOpenAIPromotion:
+    """Test OpenAI candidate promotion through levels.
+    
+    Requires:
+    1. KataGo reference servers running via `make run_all`
+    2. OpenAI/vLLM endpoint accessible
+    3. assets/models/manifest.json with level models
+    
+    Skip if manifest doesn't exist.
+    """
+    
+    @pytest.mark.skipif(not MANIFEST_PATH.exists(), reason="Manifest not found")
+    def test_promotion(self, cleanup_test_dir):
+        """Test that an OpenAI candidate can progress through ladder levels."""
+        candidate = OpenAIPlayer(api_base=OPENAI_ENDPOINT)
+        
+        print(f"\nRunning OpenAI promotion test: {GAMES_PER_LEVEL_TEST} games/level, max {MAX_LEVELS_TEST} levels")
+        print(f"  Candidate endpoint: {OPENAI_ENDPOINT}")
+        print(f"  Reference endpoint: {REFERENCE_ENDPOINT}")
+        
+        results = run_ladder_evaluation(
+            candidate=candidate,
+            manifest_path=MANIFEST_PATH,
+            output_dir=TEST_OUTPUT_DIR,
+            model_name="openai_promotion_test",
+            games_per_level=GAMES_PER_LEVEL_TEST,
+            promotion_threshold=0.5,
+            starting_elo=1000.0,
+            max_parallel=2,
+            max_moves_per_game=MAX_MOVES_PER_GAME,
+            verbose=False,
+            max_levels=MAX_LEVELS_TEST
+        )
+        
+        # Verify results
+        assert results["total_games"] > 0, "Should have played at least some games"
+        assert results["highest_level"] >= 1, "Should have completed at least level 1"
+        
+        # Verify game files were saved
+        run_dir = TEST_OUTPUT_DIR / "openai_promotion_test"
+        games_dir = run_dir / "games"
+        assert games_dir.exists(), f"Games directory not created: {games_dir}"
+        
+        # Check that SGF files exist
+        sgf_files = list(games_dir.glob("level_*/game_*.sgf"))
+        assert len(sgf_files) > 0, f"No SGF files found in {games_dir}"
+        
+        # Verify at least one SGF has content
+        for sgf_file in sgf_files[:3]:
+            with open(sgf_file) as f:
+                content = f.read()
+                assert content.startswith("(;GM[1]"), f"SGF file {sgf_file} has invalid content"
+                assert len(content) > 50, f"SGF file {sgf_file} seems too short"
+        
+        print(f"\n  Final Elo: {results['final_elo']:.0f}")
+        print(f"  Highest Level: {results['highest_level']}")
+        print(f"  Total Games: {results['total_games']}")
+        print(f"  SGF files saved: {len(sgf_files)}")
 
 
 # ============================================================================

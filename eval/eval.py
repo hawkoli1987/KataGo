@@ -12,10 +12,10 @@ Usage:
         --candidate-endpoint http://localhost:8002/v1 \\
         --model-name "qwen3-test"
 
-    # KataGo candidate
+    # KataGo candidate (connect to running server)
     python3 eval/eval.py \\
         --candidate-type katago \\
-        --candidate-model assets/models/level_03_kata1-b15c192-s497233664-d149638345.txt.gz \\
+        --candidate-endpoint http://hopper-34:9200 \\
         --model-name "katago-level3"
 
     # With custom settings
@@ -24,9 +24,7 @@ Usage:
         --candidate-endpoint http://localhost:8002/v1 \\
         --model-name "my-eval" \\
         --games-per-level 48 \\
-        --max-parallel 4 \\
-        --candidate-gpu 0 \\
-        --reference-gpu 1
+        --max-parallel 4
 """
 
 import argparse
@@ -57,17 +55,9 @@ def create_openai_player(
     )
 
 
-def create_katago_player(
-    model_path: str,
-    gpu_id: int = 0,
-    port: int = 8100
-) -> KataGoPlayer:
-    """Create a KataGo player."""
-    return KataGoPlayer(
-        model_path=model_path,
-        gpu_id=gpu_id,
-        port=port
-    )
+def create_katago_player(endpoint: str, name: Optional[str] = None) -> KataGoPlayer:
+    """Create a KataGo player connecting to a remote server."""
+    return KataGoPlayer(endpoint=endpoint, name=name)
 
 
 def main():
@@ -84,18 +74,10 @@ def main():
                         help="Type of candidate model")
     
     # Candidate config
-    parser.add_argument("--candidate-endpoint", type=str,
-                        help="API endpoint for OpenAI candidate (e.g., http://localhost:8002/v1)")
+    parser.add_argument("--candidate-endpoint", type=str, required=True,
+                        help="API endpoint for candidate (OpenAI: http://localhost:8002/v1, KataGo: http://hopper-34:9200)")
     parser.add_argument("--candidate-model", type=str,
-                        help="Model name/path (OpenAI model ID or KataGo model path)")
-    parser.add_argument("--candidate-gpu", type=int, default=0,
-                        help="GPU for candidate (default: 0)")
-    parser.add_argument("--candidate-port", type=int, default=8100,
-                        help="Port for KataGo candidate server (default: 8100)")
-    
-    # Reference config
-    parser.add_argument("--reference-gpu", type=int, default=1,
-                        help="GPU for reference KataGo (default: 1)")
+                        help="Model name for OpenAI (optional, auto-detected from endpoint)")
     
     # Paths
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST_PATH,
@@ -127,12 +109,6 @@ def main():
     
     args = parser.parse_args()
     
-    # Validate args
-    if args.candidate_type == "openai":
-        assert args.candidate_endpoint, "--candidate-endpoint required for openai type"
-    elif args.candidate_type == "katago":
-        assert args.candidate_model, "--candidate-model required for katago type"
-    
     # Create candidate player
     if args.candidate_type == "openai":
         candidate = create_openai_player(
@@ -143,9 +119,8 @@ def main():
         )
     else:  # katago
         candidate = create_katago_player(
-            model_path=args.candidate_model,
-            gpu_id=args.candidate_gpu,
-            port=args.candidate_port
+            endpoint=args.candidate_endpoint,
+            name=args.candidate_model
         )
     
     # Run evaluation
@@ -157,8 +132,6 @@ def main():
         games_per_level=args.games_per_level,
         promotion_threshold=args.promotion_threshold,
         starting_elo=args.starting_elo,
-        candidate_gpu=args.candidate_gpu,
-        reference_gpu=args.reference_gpu,
         max_parallel=args.max_parallel,
         verbose=args.verbose,
         max_levels=args.max_levels
