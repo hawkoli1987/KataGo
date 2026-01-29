@@ -18,6 +18,8 @@ dependencies = [
     # Data handling
     "pyyaml",
     "pydantic",
+    "pandas",
+    "pyarrow",  # For parquet support
     
     # SGF processing
     "sgfmill",

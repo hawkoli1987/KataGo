@@ -1,7 +1,7 @@
 {
   "go_move": {
     "system": "You are an expert Go player.",
-    "template": "You are playing Go as {color_name}. The board is 19x19.\n\nRules: {rules}\nKomi: {komi}\n\nMove history: {history_str}\n\nYour turn. Analyze the position and provide your move.\n\nYou MUST respond with a JSON object in this exact format:\n{{\"reasoning\": \"<your_analysis>\", \"move\": \"<your_move>\"}}\n\nWhere <your_move> is in GTP coordinate format:\n- Column letter A-T (skipping I)\n- Row number 1-19\n- Examples: \"D4\", \"Q16\", \"C3\", \"pass\", \"resign\"\n\nRespond with ONLY the JSON object.",
-    "variables": ["color_name", "rules", "komi", "history_str"]
+    "template": "You are playing Go as {current_player}. The board is {board_size}.\n\nRules: {rule_string}\nKomi: {komi}\n\nMove history: {move_history}\n\nYour turn. Analyze the position and predict:\n1. The root winrate (probability of winning) BEFORE making your move, as a float between 0.0 and 1.0\n2. Your best move in GTP coordinate format\n\nYou MUST respond with a JSON object in this exact format:\n{{\"reasoning\": \"<your_analysis>\", \"root_winrate\": <float_0_to_1>, \"top_move\": \"<your_move>\"}}\n\nWhere:\n- root_winrate: Your predicted probability of winning BEFORE making the move (0.0 to 1.0)\n- top_move: Your best move in GTP coordinate format:\n  - Column letter A-T (skipping I)\n  - Row number 1-19\n  - Examples: \"D4\", \"Q16\", \"C3\", \"pass\", \"resign\"\n\nRespond with ONLY the JSON object.",
+    "variables": ["current_player", "rule_string", "komi", "move_history", "board_size"]
   }
 }
