@@ -182,8 +182,9 @@ preprocess: $(VENV_DIR)/bin/activate
 	@echo "Preprocessing complete. Parquet files ready for training."
 
 train:
-	@echo "Submitting training job to PBS queue..."
-	qsub train/online_env/train.pbs
+	@echo "Submitting offline training job to PBS queue..."
+	@echo "Note: Ensure preprocessed parquet files exist (run 'make preprocess' first)"
+	qsub train/offline_env/train.pbs
 	@echo "Job submitted. Check queue status with 'qstat -u $$USER'"
 
 # =============================================================================

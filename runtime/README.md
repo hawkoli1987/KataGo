@@ -608,3 +608,58 @@ wandb needs to log the
 - Preprocessor reads `position_dir` and `move_dir` JSONL files, matches by `id`, and creates parquet files with all needed fields in `extra_info`
 - Reward function reads from `extra_info` (no file I/O during training)
 
+---
+
+## Implementation Status
+
+### ✅ Completed Phases
+
+1. **Phase 1**: Data validation test (`tests/test_data_mapping.py`) - Verifies file-to-file and row-to-row mapping
+2. **Phase 2**: Prompt template updated (`configs/prompts.json`) - Predicts both root_winrate and top_move
+3. **Phase 3**: Configuration updated (`configs/config.yaml`) - Reward weights and training config added
+4. **Phase 4A**: Preprocessor script (`train/preprocess.py`) - Combines JSONL files into parquet format
+5. **Phase 4B**: Reward function (`train/offline_env/reward.py`) - Three-component reward system implemented
+6. **Phase 5**: Training scripts (`train/offline_env/train.pbs`, `train.sh`) - Offline training setup with thinking mode
+7. **Phase 8**: Makefile updated - `make train` points to offline_env, `make preprocess` added
+8. **Phase 9**: Tests added (`tests/test_offline_reward.py`) - Comprehensive reward function tests
+
+### ⚠️ Partially Completed / Documented Limitations
+
+6. **Phase 6: WandB Logging**
+   - ✅ Total reward is automatically logged by veRL as `reward/mean` and `reward/std`
+   - ⚠️ Individual reward components (r_wr, r_move, r_legal) are stored in `extra_info["_reward_components"]` but not automatically logged to WandB
+   - 📝 **Note**: This requires veRL modifications to extract and log individual components. The total reward should be sufficient for monitoring training progress.
+
+7. **Phase 7: Rollout Logging**
+   - ⚠️ veRL does not have built-in checkpoint callback support for saving sample rollouts
+   - 📝 **Note**: This would require modifying veRL to add a checkpoint callback. Manual extraction from checkpoint directories is possible as a workaround.
+
+### Usage
+
+```bash
+# 1. Preprocess data (required before training)
+make preprocess
+
+# 2. Run tests
+pytest tests/test_data_mapping.py tests/test_offline_reward.py -v
+
+# 3. Submit training job
+make train
+```
+
+### Files Created/Modified
+
+**New Files:**
+- `train/preprocess.py` - Data preprocessor
+- `train/offline_env/reward.py` - Three-component reward function
+- `train/offline_env/train.pbs` - PBS job script
+- `train/offline_env/train.sh` - Training launch script
+- `train/offline_env/README.md` - Offline training documentation
+- `tests/test_data_mapping.py` - Data mapping validation tests
+- `tests/test_offline_reward.py` - Reward function tests
+
+**Modified Files:**
+- `configs/prompts.json` - Updated template for root_winrate and top_move prediction
+- `configs/config.yaml` - Added training.rewards section
+- `Makefile` - Updated train target, added preprocess target
+
