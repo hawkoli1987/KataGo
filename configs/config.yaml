@@ -115,9 +115,7 @@ training:
   
   # Offline training environment configuration
   offline_env:
-    position_dir: "data/positions"
-    move_dir: "data/moves"
     board_size: "19x19"  # Use 19x19 data for training
     train_file: "19x19/train.jsonl"  # Training split file (relative to position_dir/move_dir)
     test_file: "19x19/test.jsonl"    # Validation split file (relative to position_dir/move_dir)
-    output_dir: "data/RL/katago_offline"  # Output directory for preprocessed parquet files
+    # Note: position_dir, move_dir, and output_dir are inherited from data section
