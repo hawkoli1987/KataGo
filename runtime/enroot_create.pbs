@@ -18,7 +18,10 @@ export SHARED_FS="/scratch/Projects/SPEC-SF-AISG"
 export SQSH_DIR="${SHARED_FS}/sqsh"
 export BASE_SQSH="${SQSH_DIR}/ubuntu_22.04.sqsh"
 export CONTAINER_NAME="katago_dev"
-export ENROOT_DATA_PATH="${SHARED_FS}/.enroot/data"
+export ENROOT_DATA_PATH="/scratch_aisg/SPEC-SF-AISG/yuli/workdir/shared_fs/cache/.enroot"
+export ENROOT_RUNTIME_PATH="/scratch_aisg/SPEC-SF-AISG/yuli/workdir/shared_fs/cache/.enroot/runtime"
+export XDG_DATA_HOME="/scratch_aisg/SPEC-SF-AISG/yuli/workdir/shared_fs/cache/xdg"
+export XDG_CACHE_HOME="/scratch_aisg/SPEC-SF-AISG/yuli/workdir/shared_fs/cache/xdg_cache"
 
 LOG_DIR="${SQSH_DIR}/logs"
 mkdir -p "${LOG_DIR}" "${ENROOT_DATA_PATH}"
@@ -45,7 +48,6 @@ enroot start \
   --root \
   --rw \
   --rc "${RC_SCRIPT}" \
-  --mount "${HOME}:${HOME}" \
   --mount "${SHARED_FS}:${SHARED_FS}" \
   "${CONTAINER_NAME}" \
   /bin/bash -lc '
@@ -75,7 +77,10 @@ enroot start \
         libnvonnxparsers8 \
         libnvparsers8
 
-    python3 -m pip install --no-cache-dir fastapi uvicorn pyyaml
+    python3 -m pip install --no-cache-dir \
+        fastapi "uvicorn[standard]" pyyaml \
+        pydantic aiohttp httpx \
+        sgfmill tqdm pandas pyarrow
 
     ldconfig -p | grep -E "nvinfer|cudart" || true
   '

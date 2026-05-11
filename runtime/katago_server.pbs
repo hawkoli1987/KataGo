@@ -31,6 +31,7 @@ SERVER_NAME="${SERVER_NAME:-katago}"
 # Fixed paths
 REPO_DIR="/scratch/Projects/SPEC-SF-AISG/source_files/KataGo"
 SHARED_FS="/scratch/Projects/SPEC-SF-AISG"
+SHARED_FS2="/scratch_aisg/SPEC-SF-AISG"
 SQSH_FILE="${SHARED_FS}/sqsh/go.sqsh"
 CONTAINER_NAME="katago_dev"
 ENROOT_CACHE_ROOT="/scratch_aisg/SPEC-SF-AISG/yuli/workdir/shared_fs/cache/.enroot"
@@ -94,6 +95,7 @@ fi
 echo "Preparing container mount points..."
 enroot start --root --rw \
     --mount="${SHARED_FS}:${SHARED_FS}" \
+    --mount="${SHARED_FS2}:${SHARED_FS2}" \
   "${CONTAINER_NAME}" \
   /bin/bash -lc "mkdir -p ${HOST_NVIDIA_MOUNT}"
 
@@ -107,12 +109,9 @@ enroot start --root --rw \
     --env LD_LIBRARY_PATH \
     --env MODEL_PATH \
     --mount="${SHARED_FS}:${SHARED_FS}" \
+    --mount="${SHARED_FS2}:${SHARED_FS2}" \
     --mount="${HOST_LIBCUDA}:${HOST_NVIDIA_MOUNT}/libcuda.so.1" \
     --mount="${HOST_LIBNVML}:${HOST_NVIDIA_MOUNT}/libnvidia-ml.so.1" \
     --mount="/usr/bin/nvidia-smi:/usr/bin/nvidia-smi" \
   "${CONTAINER_NAME}" \
-  /bin/bash -lc "
-    PKGS_DIR=/scratch_aisg/SPEC-SF-AISG/yuli/workdir/shared_fs/cache/katago_py_pkgs
-    pip install --quiet --target \${PKGS_DIR} uvicorn[standard] fastapi pydantic pyyaml aiohttp httpx sgfmill tqdm pandas pyarrow 2>&1 | tail -3
-    cd ${REPO_DIR} && PYTHONPATH=\${PKGS_DIR} python3 -m uvicorn runtime.analysis_server:app --host 0.0.0.0 --port ${SERVER_PORT}
-  "
+  /bin/bash -lc "cd ${REPO_DIR} && uvicorn runtime.analysis_server:app --host 0.0.0.0 --port ${SERVER_PORT}"
