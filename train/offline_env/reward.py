@@ -22,11 +22,10 @@ from typing import Optional, Tuple
 
 import yaml
 
-# Add parent directory to path
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-
-REPO_ROOT = Path(__file__).parent.parent.parent.resolve()
-CONFIG_PATH = REPO_ROOT / "configs" / "config.yaml"
+# When reward.py is copied to LOG_DIR, configs/ is also copied there
+# So we look for configs in the same directory as this file
+SCRIPT_DIR = Path(__file__).parent.resolve()
+CONFIG_PATH = SCRIPT_DIR / "configs" / "config.yaml"
 
 # Cache for reward weights
 _reward_weights_cache = None

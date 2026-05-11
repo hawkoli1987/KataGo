@@ -1,3 +1,72 @@
+# KataGo — AISG Offline RL Fork
+
+This fork extends the original KataGo codebase with an **offline RL training pipeline** that teaches LLMs (e.g. Qwen3-4B) to predict KataGo's winrate and best move using GRPO/DAPO via [veRL](https://github.com/volcengine/verl).
+
+## AISG Pipeline
+
+### Prerequisites
+- HPC cluster with PBS scheduler and enroot containers
+- Container image: `/scratch/Projects/SPEC-SF-AISG/sqsh/go.sqsh`
+- Model weights in `assets/models/`
+- Python env: `make install` (creates `.venv`)
+
+### Analysis Server (KataGo engine)
+
+Runs the strongest KataGo model as a FastAPI HTTP analysis endpoint on port 9200.
+
+```bash
+# Start server (submits PBS batch job)
+bash runtime/manage_servers.sh start candidate
+
+# Check status
+bash runtime/manage_servers.sh status
+
+# Stop
+bash runtime/manage_servers.sh stop candidate
+```
+
+Logs appear at `runtime/log/<PBS_JOBID>/pbs.log`. Server serves at `http://<hostname>:9200`.
+
+**Config** (`configs/config.yaml`):
+- `servers.candidate.port` — port (default 9200)
+- `servers.candidate.model_path` — model to serve
+
+### Data Pipeline
+
+```bash
+make extract         # SGF files → JSONL positions
+make analyze_offline # positions → KataGo analysis JSONL (server must be running)
+make preprocess      # positions + analysis → parquet for veRL
+```
+
+Data flows: `data/raw_sgfs/` → `data/positions/` → `data/moves/` → `data/RL/katago_offline/19x19/`
+
+### Offline RL Training
+
+```bash
+make train           # qsub train/offline_env/train.pbs (2-node H200 job)
+```
+
+Reward function (`train/offline_env/reward.py`) scores LLM responses on three components:
+- `r_wr` — negative MSE on predicted winrate
+- `r_move` — 1 if predicted move matches KataGo top move
+- `r_legal` — −1 if move is illegal
+
+Weights are configured in `configs/config.yaml` under `training.rewards`.
+
+### Evaluation
+
+```bash
+# Ladder evaluation: LLM candidate vs KataGo reference models
+python3 eval/eval.py --candidate-type openai --candidate-endpoint http://localhost:8002/v1 --model-name my-model
+```
+
+---
+
+*Original KataGo README follows.*
+
+---
+
 # KataGo
 
 * [Overview](#overview)

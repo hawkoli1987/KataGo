@@ -219,10 +219,14 @@ def process_split(
                 # Ground truth (string representation of root_winrate)
                 ground_truth = str(root_winrate) if root_winrate is not None else ""
                 
+                # veRL naive reward manager expects reward_model and data_source
+                reward_model = {"ground_truth": ground_truth}
                 rows.append({
                     "prompt": prompt_messages,
                     "extra_info": extra_info,
-                    "ground_truth": ground_truth
+                    "ground_truth": ground_truth,
+                    "data_source": "katago/offline",
+                    "reward_model": reward_model
                 })
                 
                 position_count += 1

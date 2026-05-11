@@ -33,7 +33,12 @@ REPO_DIR="/scratch/Projects/SPEC-SF-AISG/source_files/KataGo"
 SHARED_FS="/scratch/Projects/SPEC-SF-AISG"
 SQSH_FILE="${SHARED_FS}/sqsh/go.sqsh"
 CONTAINER_NAME="katago_dev"
-ENROOT_DATA_PATH="${SHARED_FS}/.enroot/data"
+ENROOT_CACHE_ROOT="/scratch_aisg/SPEC-SF-AISG/yuli/workdir/shared_fs/cache/.enroot"
+ENROOT_DATA_PATH="${ENROOT_CACHE_ROOT}"
+export ENROOT_DATA_PATH
+export ENROOT_RUNTIME_PATH="${ENROOT_CACHE_ROOT}/runtime"
+export XDG_DATA_HOME="/scratch_aisg/SPEC-SF-AISG/yuli/workdir/shared_fs/cache/xdg"
+export XDG_CACHE_HOME="/scratch_aisg/SPEC-SF-AISG/yuli/workdir/shared_fs/cache/xdg_cache"
 HOST_NVIDIA_MOUNT="/opt/host-nvidia"
 
 # CUDA driver libraries
@@ -88,7 +93,6 @@ fi
 # Ensure mount target exists
 echo "Preparing container mount points..."
 enroot start --root --rw \
-    --mount="${HOME}:${HOME}" \
     --mount="${SHARED_FS}:${SHARED_FS}" \
   "${CONTAINER_NAME}" \
   /bin/bash -lc "mkdir -p ${HOST_NVIDIA_MOUNT}"
@@ -102,10 +106,13 @@ export MODEL_PATH="${FULL_MODEL_PATH}"
 enroot start --root --rw \
     --env LD_LIBRARY_PATH \
     --env MODEL_PATH \
-    --mount="${HOME}:${HOME}" \
     --mount="${SHARED_FS}:${SHARED_FS}" \
     --mount="${HOST_LIBCUDA}:${HOST_NVIDIA_MOUNT}/libcuda.so.1" \
     --mount="${HOST_LIBNVML}:${HOST_NVIDIA_MOUNT}/libnvidia-ml.so.1" \
     --mount="/usr/bin/nvidia-smi:/usr/bin/nvidia-smi" \
   "${CONTAINER_NAME}" \
-  /bin/bash -lc "cd ${REPO_DIR} && uvicorn runtime.analysis_server:app --host 0.0.0.0 --port ${SERVER_PORT}"
+  /bin/bash -lc "
+    PKGS_DIR=/scratch_aisg/SPEC-SF-AISG/yuli/workdir/shared_fs/cache/katago_py_pkgs
+    pip install --quiet --target \${PKGS_DIR} uvicorn[standard] fastapi pydantic pyyaml aiohttp httpx sgfmill tqdm pandas pyarrow 2>&1 | tail -3
+    cd ${REPO_DIR} && PYTHONPATH=\${PKGS_DIR} python3 -m uvicorn runtime.analysis_server:app --host 0.0.0.0 --port ${SERVER_PORT}
+  "

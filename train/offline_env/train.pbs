@@ -1,7 +1,7 @@
 #!/bin/bash
 
-#PBS -N go_offline
-#PBS -q AISG_debug
+#PBS -N verl_train
+#PBS -q AISG_large
 #PBS -l select=2:ngpus=8:ncpus=100:mem=1500gb
 #PBS -l walltime=24:00:00
 #PBS -o /dev/null
@@ -28,14 +28,52 @@ export SHARED_FS="/scratch_aisg/SPEC-SF-AISG"
 export SHARED_FS2="/scratch/Projects/SPEC-SF-AISG"
 
 # ============================================================================
-# Algorithm: DAPO for KataGo offline training
+# Algorithm: GRPO (align with hopper_verl baseline)
 # ============================================================================
-export ALGO="dapo"
+export ALGO="grpo"
+
+# ============================================================================
+# Experiment configuration (baseline tuned for 2x H200)
+# Override on submission: qsub -v MODEL_PATH=...,TRAIN_BATCH_SIZE=... train.pbs
+# ============================================================================
+# Model
+export MODEL_PATH="${MODEL_PATH:-Qwen/Qwen3-4B}"
+export TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-512}"        # GBS
+export MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-4096}"      # increased: some prompts tokenize to 2285+ tokens
+export MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-8192}"  # keep 8k
+
+# Actor (Megatron TP=4)
+export ACTOR_STRATEGY="${ACTOR_STRATEGY:-megatron}"
+export ACTOR_TP_SIZE="${ACTOR_TP_SIZE:-4}"
+export ACTOR_PP_SIZE="${ACTOR_PP_SIZE:-1}"
+export ACTOR_MICRO_BS="${ACTOR_MICRO_BS:-8}"
+export ACTOR_MINI_BS="${ACTOR_MINI_BS:-512}"
+export ACTOR_LR="${ACTOR_LR:-1e-6}"
+export ACTIVATION_OFFLOAD="${ACTIVATION_OFFLOAD:-False}"
+
+# GRPO Group Sampling
+export ROLLOUT_N="${ROLLOUT_N:-16}"
+
+# Generation (vLLM)
+export GPU_MEMORY_UTIL="${GPU_MEMORY_UTIL:-0.90}"
+export ROLLOUT_LOG_PROB_BS="${ROLLOUT_LOG_PROB_BS:-4}"
+export ROLLOUT_TP_SIZE="${ROLLOUT_TP_SIZE:-1}"
+export ROLLOUT_QUANTIZATION="${ROLLOUT_QUANTIZATION:-}"
+export ENFORCE_EAGER="${ENFORCE_EAGER:-False}"
+
+# Reference
+export REF_LOG_PROB_BS="${REF_LOG_PROB_BS:-4}"
+
+# Training
+export TOTAL_EPOCHS="${TOTAL_EPOCHS:-15}"
+export TOTAL_STEPS="${TOTAL_STEPS:-0}"     # 0 = use epochs
+export SAVE_FREQ="${SAVE_FREQ:-60}"
+export TEST_FREQ="${TEST_FREQ:-7}"
 
 # ============================================================================
 # Log directory (must be created before container launch)
 # ============================================================================
-export LOG_DIR="${SHARED_FS}/log/verl/${SWEEP_NAME:-}/${JOB_NAME}/${JOB_ID}"
+export LOG_DIR="${SHARED_FS}/log/go/${SWEEP_NAME:-}/${JOB_NAME}/${JOB_ID}"
 
 umask 0007
 mkdir -p "${LOG_DIR}/nccl"
@@ -71,6 +109,8 @@ SIF_PATH="${SHARED_FS}/sif/verl-vllm012.sif"
 cp "${SCRIPT_DIR}/train/offline_env/train.pbs" "${LOG_DIR}/train.pbs"
 cp "${SCRIPT_DIR}/train/offline_env/train.sh" "${LOG_DIR}/train.sh"
 cp "${SCRIPT_DIR}/train/offline_env/reward.py" "${LOG_DIR}/reward.py"
+# Copy configs dir for reward.py (it looks for configs/config.yaml relative to its parent)
+cp -r "${SCRIPT_DIR}/configs" "${LOG_DIR}/configs"
 chmod +rx "${LOG_DIR}"/*
 
 BASH_SCRIPT="${LOG_DIR}/train.sh"
@@ -102,4 +142,26 @@ mpirun -np "${NUM_NODES}" \
     -x SHARED_FS \
     -x SHARED_FS2 \
     -x ALGO \
+    -x MODEL_PATH \
+    -x TRAIN_BATCH_SIZE \
+    -x MAX_PROMPT_LENGTH \
+    -x MAX_RESPONSE_LENGTH \
+    -x GPU_MEMORY_UTIL \
+    -x ROLLOUT_LOG_PROB_BS \
+    -x ROLLOUT_TP_SIZE \
+    -x ROLLOUT_N \
+    -x ROLLOUT_QUANTIZATION \
+    -x ENFORCE_EAGER \
+    -x REF_LOG_PROB_BS \
+    -x ACTOR_MICRO_BS \
+    -x ACTOR_MINI_BS \
+    -x ACTOR_LR \
+    -x ACTIVATION_OFFLOAD \
+    -x ACTOR_STRATEGY \
+    -x ACTOR_TP_SIZE \
+    -x ACTOR_PP_SIZE \
+    -x TOTAL_EPOCHS \
+    -x TOTAL_STEPS \
+    -x SAVE_FREQ \
+    -x TEST_FREQ \
     bash -c "${launch_cmd}"
