@@ -5,43 +5,74 @@ This fork extends the original KataGo codebase with an **offline RL training pip
 ## AISG Pipeline
 
 ### Prerequisites
-- HPC cluster with PBS scheduler and enroot containers
-- Container image: `/scratch/Projects/SPEC-SF-AISG/sqsh/go.sqsh`
+
+- HPC cluster with PBS scheduler and enroot
+- Container image: `/scratch/Projects/SPEC-SF-AISG/sqsh/go.sqsh` (rebuild: `qsub runtime/enroot_create.pbs`)
 - Model weights in `assets/models/`
 - Python env: `make install` (creates `.venv`)
+- Data directory: `data/` symlink → `/scratch_aisg/SPEC-SF-AISG/data/RL/katago`
 
-### Analysis Server (KataGo engine)
+### 1. Start the Analysis Server
 
-Runs the strongest KataGo model as a FastAPI HTTP analysis endpoint on port 9200.
+The analysis server runs the strongest KataGo model as a FastAPI HTTP endpoint. It is submitted as a PBS batch job and may land on any available GPU node — the hostname is not fixed.
 
 ```bash
-# Start server (submits PBS batch job)
+# Submit PBS job and wait for HEALTHY
 bash runtime/manage_servers.sh start candidate
 
-# Check status
+# Check status and find the current endpoint
 bash runtime/manage_servers.sh status
+# Example output:
+#   candidate: RUNNING (job: 473909.hopper-m-02, endpoint: http://hopper-37:9200, status: HEALTHY)
 
 # Stop
 bash runtime/manage_servers.sh stop candidate
 ```
 
-Logs appear at `runtime/log/<PBS_JOBID>/pbs.log`. Server serves at `http://<hostname>:9200`.
+Logs: `runtime/log/<PBS_JOBID>/pbs.log`. Port and model are set in `configs/config.yaml` under `servers.candidate`.
 
-**Config** (`configs/config.yaml`):
-- `servers.candidate.port` — port (default 9200)
-- `servers.candidate.model_path` — model to serve
+> **Note**: If `go.sqsh` is missing or stale, rebuild it first:
+> ```bash
+> qsub runtime/enroot_create.pbs   # runs on AISG_large queue, ~30 min
+> ```
 
-### Data Pipeline
+### 2. Generate Data
+
+Positions have already been extracted from KataGo self-play SGFs into `data/positions/`. The analysis step calls the running server to generate `root_winrate` and `top_move` labels.
 
 ```bash
-make extract         # SGF files → JSONL positions
-make analyze_offline # positions → KataGo analysis JSONL (server must be running)
-make preprocess      # positions + analysis → parquet for veRL
+# Step 1 (already done for 19x19): Extract positions from SGF files
+make extract         # data/raw_sgfs/ → data/positions/<boardsize>/
+
+# Step 2: Analyze positions — calls KataGo server, writes labels
+make analyze_offline # data/positions/ → data/moves/  (server must be HEALTHY)
+
+# Step 3: Join positions + labels into parquet for veRL training
+make preprocess      # data/positions/ + data/moves/ → data/RL/katago_offline/19x19/
 ```
 
-Data flows: `data/raw_sgfs/` → `data/positions/` → `data/moves/` → `data/RL/katago_offline/19x19/`
+Data flow:
+```
+data/raw_sgfs/
+  └── (SGF games)
+data/positions/19x19/train.jsonl   ← board state + move history per position
+data/moves/19x19/train.jsonl       ← root_winrate + top_move per position (KataGo labels)
+data/RL/katago_offline/19x19/train.parquet  ← prompt + extra_info ready for veRL
+```
 
-### Offline RL Training
+For large runs, `analyze_offline.py` can also be invoked directly with full control:
+
+```bash
+.venv/bin/python runtime/analyze_offline.py \
+  --input  data/positions/19x19/train.jsonl \
+  --output data/moves/19x19/train.jsonl \
+  --endpoint http://<hostname>:9200/analysis \
+  --max-concurrent 512
+```
+
+> Use `.venv/bin/python` explicitly (not `python` after `source activate`) when running as a background/nohup job.
+
+### 3. Offline RL Training
 
 ```bash
 make train           # qsub train/offline_env/train.pbs (2-node H200 job)
@@ -54,7 +85,7 @@ Reward function (`train/offline_env/reward.py`) scores LLM responses on three co
 
 Weights are configured in `configs/config.yaml` under `training.rewards`.
 
-### Evaluation
+### 4. Evaluation
 
 ```bash
 # Ladder evaluation: LLM candidate vs KataGo reference models

@@ -16,24 +16,24 @@ The original KataGo C++ engine and Python selfplay training code live under `cpp
 
 ## Common commands
 
-All Python commands assume the `.venv` at the repo root is active (`source .venv/bin/activate`) unless noted otherwise. The Makefile handles activation automatically.
+All Python commands assume the `.venv` at the repo root is active (`source .venv/bin/activate`) unless noted otherwise. The Makefile handles activation automatically. For background jobs, always use the full path `.venv/bin/python` instead of `python` — shell activation does not carry into `nohup`/`&` subprocesses.
 
 ```bash
 # Install Python dependencies
 make install
 
 # Start / stop KataGo analysis servers (candidate on :9200, reference on :9201)
-make run_all
-make stop
-make status
+bash runtime/manage_servers.sh start candidate   # submits PBS job, waits for HEALTHY
+bash runtime/manage_servers.sh status            # check status + endpoint
+bash runtime/manage_servers.sh stop candidate
 
 # Full data + training pipeline (run in order):
-make extract        # SGF → JSONL positions  (reads sgf_dir from config.yaml)
+make extract          # SGF → JSONL positions  (reads sgf_dir from config.yaml)
 make analyze_offline  # positions → KataGo move analysis JSONL (server must be running)
-make preprocess     # positions + moves → parquet for veRL (uses data.limit from config.yaml)
-make train          # submit PBS job: qsub train/offline_env/train.pbs
+make preprocess       # positions + moves → parquet for veRL (uses data.limit from config.yaml)
+make train            # submit PBS job: qsub train/offline_env/train.pbs
 
-# Evaluation tests (requires servers running via make run_all)
+# Evaluation tests (requires servers running)
 make test-eval
 
 # Run individual test files
@@ -72,10 +72,13 @@ Joins `data/positions/` and `data/moves/` JSONL files by `id`, formats prompts u
 
 ## HPC / container workflow
 
-The project runs on an HPC cluster (PBS scheduler, Singularity containers).
+The project runs on an HPC cluster (PBS scheduler, enroot containers).
 
-- **Container image**: `go.sqsh` at `/scratch/Projects/SPEC-SF-AISG/sqsh/`. Created by `runtime/enroot_create.pbs`.
-- **Interactive dev session**: `qsub -I -q AISG_debug -l select=1:mem=200gb:ncpus=32:ngpus=1:host=hopper-34`, then `bash runtime/enroot_start.pbs` from tmux session `go` on `hopper-34`.
+- **Container image**: `go.sqsh` at `/scratch/Projects/SPEC-SF-AISG/sqsh/`. All Python deps (fastapi, uvicorn, pydantic, aiohttp, httpx, sgfmill, tqdm, pandas, pyarrow) are baked in. Rebuild with `qsub runtime/enroot_create.pbs` (runs on `AISG_large`, takes ~30 min).
+- **Data directory**: `data/` is a symlink → `/scratch_aisg/SPEC-SF-AISG/data/RL/katago`. Must exist before running any data pipeline step.
+- **Analysis server**: runs as a PBS batch job on whichever GPU node is allocated (not the login node). The serving hostname changes per job. Always use `bash runtime/manage_servers.sh status` to find the current endpoint — do not hardcode hostnames.
+- **Enroot paths**: all enroot data must be on scratch, never `$HOME`. `ENROOT_DATA_PATH=/scratch_aisg/SPEC-SF-AISG/yuli/workdir/shared_fs/cache/.enroot`.
+- **Interactive dev session**: `qsub -I -q AISG_debug -l select=1:mem=200gb:ncpus=32:ngpus=1`, then `bash runtime/enroot_start.pbs`.
 - **Training job**: `make train` (or `qsub train/offline_env/train.pbs`). Logs go to `${SHARED_FS}/log/go/<JOB_NAME>/<JOB_ID>/`.
 - Tokens required at runtime: `~/.hf_token` (HuggingFace) and `~/.wandb` (W&B), sourced inside `train.sh`.
 
