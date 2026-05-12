@@ -107,6 +107,12 @@ async def analyze_single(
                     error_tracker[last_error] = error_tracker.get(last_error, 0) + 1
                 if attempt < config.retry_count - 1:
                     await asyncio.sleep(config.retry_delay * (attempt + 1))
+            except Exception as e:
+                last_error = f"UnexpectedError_{type(e).__name__}"
+                if error_tracker is not None:
+                    error_tracker[last_error] = error_tracker.get(last_error, 0) + 1
+                if attempt < config.retry_count - 1:
+                    await asyncio.sleep(config.retry_delay * (attempt + 1))
         
         # All retries exhausted
         request_time = time.time() - request_start
