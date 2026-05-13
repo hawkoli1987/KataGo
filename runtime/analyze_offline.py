@@ -220,19 +220,16 @@ def run_analysis(
         for _ in range(already_done):
             next(in_f)
 
-        queries_seen = 0
-        while True:
-            # Load next chunk
+        while chunk_offset < total_input:
+            # Load next chunk, capped by chunk_size and total_input
+            target = min(chunk_size, total_input - chunk_offset)
             chunk: List[dict] = []
             for line in in_f:
                 line = line.strip()
                 if not line:
                     continue
                 chunk.append(json.loads(line))
-                queries_seen += 1
-                if limit is not None and (already_done + queries_seen) >= limit:
-                    break
-                if len(chunk) >= chunk_size:
+                if len(chunk) >= target:
                     break
 
             if not chunk:
