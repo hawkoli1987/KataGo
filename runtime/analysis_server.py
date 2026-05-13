@@ -1,32 +1,33 @@
 """KataGo Analysis Server.
 
-Provides HTTP endpoints for Go position analysis and move generation.
-Supports both analysis mode (position evaluation) and game playing.
+Async pipelined wrapper around the KataGo analysis CLI subprocess.
+
+KataGo's analysis mode reads JSON queries from stdin and writes JSON responses
+to stdout, each tagged with the query's `id` field. Multiple queries can be
+in flight simultaneously; responses may arrive in any order.
+
+This server exposes that protocol over HTTP:
+    POST /analysis          — raw KataGo query passthrough
+    POST /move              — convenience: return best move + winrate
+    POST /analyze_position  — convenience: return winrate only
+    GET  /health            — liveness check
+
+Concurrency model: a single background `_read_loop` task continuously reads
+KataGo stdout and dispatches each response to its waiting request's
+asyncio.Future, keyed by `id`. An asyncio.Lock guards only the stdin write
+so multiple in-flight writes don't interleave. Endpoints await their future
+and return the collected responses.
 
 Usage:
-    # Start server (uses config.yaml for default model)
     uvicorn runtime.analysis_server:app --host 0.0.0.0 --port 9200
-
-    # Start with custom model
-    MODEL_PATH=assets/models/level_01_kata1-b6c96-s175395328-d26788732.txt.gz \
-        uvicorn runtime.analysis_server:app --host 0.0.0.0 --port 8100
-
-Endpoints:
-    POST /analysis - KataGo analysis API (raw JSON query)
-    POST /move - Generate best move for a position (game playing)
-    GET /health - Health check
+    MODEL_PATH=path/to/model.bin.gz uvicorn ...
 """
 
+import asyncio
 import json
 import os
-import re
-import selectors
-import signal
-import subprocess
-import threading
-import time
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import yaml
 from fastapi import FastAPI, HTTPException, Request, Response
@@ -38,36 +39,41 @@ CONFIG_PATH = ROOT_DIR / "configs" / "config.yaml"
 DEFAULT_ANALYSIS_CONFIG = ROOT_DIR / "assets" / "bin" / "katago-trt" / "analysis_example.cfg"
 STDERR_LOG = ROOT_DIR / "runtime" / "analysis_server.stderr.log"
 ANALYSIS_TIMEOUT_SEC = 120
+STARTUP_WAIT_SEC = 3
 
+
+# =============================================================================
+# Pydantic models (used by /move and /analyze_position)
+# =============================================================================
 
 class MoveRequest(BaseModel):
-    """Request for generating a move."""
-    moves: List[List[str]]  # [[color, move], ...] e.g. [["B", "D4"], ["W", "Q16"]]
-    rules: str  # KataGo rule string
+    moves: List[List[str]]
+    rules: str
     komi: float
-    color: str  # "B" or "W" - which color to play
+    color: str
     board_size: int = 19
 
 
 class MoveResponse(BaseModel):
-    """Response containing the generated move."""
-    move: str  # GTP format move (e.g., "D4", "pass", "resign")
+    move: str
     win_rate: Optional[float] = None
 
 
 class AnalysisPositionRequest(BaseModel):
-    """Request for position analysis (win rate)."""
     moves: List[List[str]]
     rules: str
     komi: float
-    color: str  # Perspective for win rate
+    color: str
     board_size: int = 19
 
 
 class AnalysisPositionResponse(BaseModel):
-    """Response containing position analysis."""
     win_rate: float
 
+
+# =============================================================================
+# Config / command building
+# =============================================================================
 
 def load_config() -> dict:
     if not CONFIG_PATH.is_file():
@@ -77,228 +83,264 @@ def load_config() -> dict:
 
 
 def resolve_path(path: str) -> Path:
-    """Resolve a path relative to repo root."""
     p = Path(path)
-    if p.is_absolute():
-        return p
-    return ROOT_DIR / p
+    return p if p.is_absolute() else ROOT_DIR / p
 
 
 def build_command(model_path: Optional[str] = None) -> List[str]:
-    """Build KataGo command line."""
-    cfg = load_config()
-    katago_cfg = cfg.get("katago") or {}
-    
-    # Get binary path
-    binary_path = katago_cfg.get("binary_path", "assets/bin/katago-trt/katago")
-    binary = resolve_path(binary_path)
-    
-    # Get model path (can be overridden by environment variable)
+    cfg = load_config().get("katago") or {}
+    binary = resolve_path(cfg.get("binary_path", "assets/bin/katago-trt/katago"))
     if model_path:
         model = resolve_path(model_path)
     else:
         env_model = os.environ.get("MODEL_PATH")
-        if env_model:
-            model = resolve_path(env_model)
-        else:
-            default_model = katago_cfg.get("model_path", "assets/models/kata1-b28c512nbt-s12223529728-d5663671073.bin.gz")
-            model = resolve_path(default_model)
-    
-    # Get config path
-    config_path = DEFAULT_ANALYSIS_CONFIG
-    
+        default_model = cfg.get("model_path",
+                                "assets/models/kata1-b28c512nbt-s12223529728-d5663671073.bin.gz")
+        model = resolve_path(env_model or default_model)
+
     assert binary.is_file(), f"Missing KataGo binary: {binary}"
     assert model.is_file(), f"Missing model: {model}"
-    assert config_path.is_file(), f"Missing analysis config: {config_path}"
-    
-    return [str(binary), "analysis", "-config", str(config_path), "-model", str(model)]
+    assert DEFAULT_ANALYSIS_CONFIG.is_file(), f"Missing analysis config: {DEFAULT_ANALYSIS_CONFIG}"
 
+    return [str(binary), "analysis", "-config", str(DEFAULT_ANALYSIS_CONFIG), "-model", str(model)]
+
+
+# =============================================================================
+# Async analysis engine
+# =============================================================================
 
 class AnalysisEngine:
-    """KataGo analysis engine subprocess manager."""
-    
+    """Async wrapper around the KataGo analysis subprocess.
+
+    Multiple `query()` calls can be in flight simultaneously; responses are
+    routed back by KataGo's `id` field via a single background reader task.
+    """
+
     def __init__(self, cmd: List[str]) -> None:
         self._cmd = cmd
-        self._lock = threading.Lock()
-        self._selector = selectors.DefaultSelector()
-        self._request_id = 0
-        self._proc = self._start_process()
-        self._start_stderr_thread()
-        self._model_path = cmd[-1]  # Last arg is model path
+        self._model_path = cmd[-1]
+        self._proc: Optional[asyncio.subprocess.Process] = None
+        self._reader_task: Optional[asyncio.Task] = None
+        self._stderr_task: Optional[asyncio.Task] = None
+        self._write_lock = asyncio.Lock()
 
-    def _start_process(self) -> subprocess.Popen:
-        print(f"Starting KataGo: {' '.join(self._cmd)}")
-        proc = subprocess.Popen(
-            self._cmd,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1,
-            preexec_fn=os.setsid,
+        # Per-request state, keyed by KataGo query id
+        self._pending: Dict[str, asyncio.Future] = {}
+        self._responses: Dict[str, List[str]] = {}
+        self._expected: Dict[str, int] = {}
+        self._done_count: Dict[str, int] = {}
+
+        # For internally-generated queries (/move, /analyze_position)
+        self._internal_id = 0
+
+    # ---------------- lifecycle ----------------
+
+    async def start(self) -> None:
+        print(f"Starting KataGo: {' '.join(self._cmd)}", flush=True)
+        self._proc = await asyncio.create_subprocess_exec(
+            *self._cmd,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
         )
-        if proc.stdout is None:
-            raise RuntimeError("Failed to open stdout for KataGo process")
-        self._selector.register(proc.stdout, selectors.EVENT_READ)
-        
-        # Wait for startup
-        time.sleep(3)
-        if proc.poll() is not None:
-            stderr = proc.stderr.read() if proc.stderr else ""
-            raise RuntimeError(f"KataGo failed to start: {stderr}")
-        
-        print("KataGo analysis engine ready")
-        return proc
+        self._reader_task = asyncio.create_task(self._read_loop(), name="katago_reader")
+        self._stderr_task = asyncio.create_task(self._stderr_loop(), name="katago_stderr")
 
-    def _start_stderr_thread(self) -> None:
-        if self._proc.stderr is None:
-            return
+        # Give KataGo time to load the model.
+        await asyncio.sleep(STARTUP_WAIT_SEC)
+        if self._proc.returncode is not None:
+            raise RuntimeError(f"KataGo exited at startup with code {self._proc.returncode}")
+        print("KataGo analysis engine ready", flush=True)
+
+    async def shutdown(self) -> None:
+        for task in (self._reader_task, self._stderr_task):
+            if task and not task.done():
+                task.cancel()
+        if self._proc and self._proc.returncode is None:
+            try:
+                self._proc.terminate()
+                await asyncio.wait_for(self._proc.wait(), timeout=5)
+            except (asyncio.TimeoutError, ProcessLookupError):
+                if self._proc.returncode is None:
+                    self._proc.kill()
+
+    def is_alive(self) -> bool:
+        return self._proc is not None and self._proc.returncode is None
+
+    # ---------------- background tasks ----------------
+
+    async def _read_loop(self) -> None:
+        """Read KataGo stdout and dispatch responses to pending futures by id."""
+        assert self._proc and self._proc.stdout
+        while True:
+            line = await self._proc.stdout.readline()
+            if not line:  # EOF — KataGo died
+                self._fail_all_pending(RuntimeError("KataGo stdout closed unexpectedly"))
+                return
+
+            stripped = line.decode("utf-8", errors="replace").strip()
+            if not stripped:
+                continue
+            try:
+                payload = json.loads(stripped)
+            except json.JSONDecodeError:
+                continue  # KataGo only emits JSON on stdout in analysis mode; skip oddities
+
+            req_id = payload.get("id")
+            if req_id is None or req_id not in self._pending:
+                continue  # untagged, or request already timed out / cancelled
+
+            self._responses[req_id].append(stripped)
+            fut = self._pending[req_id]
+            if fut.done():
+                continue
+
+            if payload.get("error"):
+                fut.set_result(self._responses[req_id])
+            elif payload.get("warning"):
+                pass  # warnings don't count toward completion
+            elif payload.get("isDuringSearch") is False:
+                self._done_count[req_id] += 1
+                if self._done_count[req_id] >= self._expected[req_id]:
+                    fut.set_result(self._responses[req_id])
+
+    async def _stderr_loop(self) -> None:
+        """Drain KataGo stderr to a log file."""
+        assert self._proc and self._proc.stderr
         STDERR_LOG.parent.mkdir(parents=True, exist_ok=True)
-        stderr = self._proc.stderr
+        with open(STDERR_LOG, "ab") as f:
+            while True:
+                line = await self._proc.stderr.readline()
+                if not line:
+                    return
+                f.write(line)
+                f.flush()
 
-        def _drain() -> None:
-            with open(STDERR_LOG, "a", encoding="utf-8") as f:
-                for line in stderr:
-                    f.write(line)
+    def _fail_all_pending(self, exc: BaseException) -> None:
+        for fut in self._pending.values():
+            if not fut.done():
+                fut.set_exception(exc)
 
-        thread = threading.Thread(target=_drain, daemon=True)
-        thread.start()
+    # ---------------- public API ----------------
 
-    def _readline(self, timeout: float) -> Optional[str]:
-        events = self._selector.select(timeout)
-        if not events:
-            return None
-        if self._proc.stdout is None:
-            return None
-        return self._proc.stdout.readline()
+    async def query(
+        self,
+        line: str,
+        req_id: str,
+        expected: int = 1,
+        timeout: float = ANALYSIS_TIMEOUT_SEC,
+    ) -> List[str]:
+        """Send one query to KataGo and await its completion.
 
-    def query(self, line: str, expected: int) -> List[str]:
-        """Send raw analysis query."""
-        if self._proc.poll() is not None:
+        Args:
+            line:     single-line JSON query (no embedded newlines)
+            req_id:   the `id` field inside the query (must be unique among in-flight)
+            expected: number of `isDuringSearch:false` responses to wait for
+                      (equals len(analyzeTurns) in the query, or 1 if absent)
+            timeout:  seconds to wait before raising asyncio.TimeoutError
+
+        Returns:
+            List of raw response lines from KataGo (typically one JSON line per
+            analyzeTurn, plus any warnings).
+        """
+        if not self.is_alive():
             raise RuntimeError("KataGo process is not running")
-        if self._proc.stdin is None:
-            raise RuntimeError("KataGo stdin is not available")
+        if req_id in self._pending:
+            raise ValueError(f"Duplicate in-flight request id: {req_id}")
 
-        with self._lock:
-            self._proc.stdin.write(line + "\n")
-            self._proc.stdin.flush()
+        loop = asyncio.get_event_loop()
+        fut: asyncio.Future = loop.create_future()
+        self._pending[req_id] = fut
+        self._expected[req_id] = expected
+        self._responses[req_id] = []
+        self._done_count[req_id] = 0
 
-            responses: List[str] = []
-            matched = 0
-            while matched < expected:
-                next_line = self._readline(ANALYSIS_TIMEOUT_SEC)
-                if next_line is None:
-                    raise TimeoutError("Timed out waiting for KataGo response")
-                stripped = next_line.strip()
-                if not stripped:
-                    continue
-                responses.append(stripped)
-                try:
-                    payload = json.loads(stripped)
-                except json.JSONDecodeError:
-                    continue
-                if payload.get("error"):
-                    break
-                if payload.get("warning"):
-                    continue
-                if payload.get("id") is not None and payload.get("isDuringSearch") is False:
-                    matched += 1
-            return responses
+        try:
+            async with self._write_lock:
+                assert self._proc and self._proc.stdin
+                self._proc.stdin.write((line + "\n").encode())
+                await self._proc.stdin.drain()
+            return await asyncio.wait_for(fut, timeout=timeout)
+        finally:
+            self._pending.pop(req_id, None)
+            self._expected.pop(req_id, None)
+            self._responses.pop(req_id, None)
+            self._done_count.pop(req_id, None)
 
-    def get_move(self, moves: List[List[str]], rules: str, komi: float,
-                 color: str, board_size: int = 19) -> tuple[str, Optional[float]]:
-        """Get best move for a position using analysis API."""
-        self._request_id += 1
-        
-        # Build analysis request
-        # Convert moves to KataGo format
+    async def get_move(
+        self,
+        moves: List[List[str]],
+        rules: str,
+        komi: float,
+        color: str,
+        board_size: int = 19,
+    ) -> tuple[str, Optional[float]]:
+        """Return (best move in GTP form, winrate) for the given position."""
+        self._internal_id += 1
+        req_id = f"internal_{self._internal_id}"
+
         katago_moves = []
-        for move_color, move in moves:
-            # KataGo uses lowercase color
-            c = move_color.upper()
-            m = move.upper()
-            if m == "PASS":
-                katago_moves.append([c, "pass"])
-            else:
-                katago_moves.append([c, m])
-        
+        for c, m in moves:
+            mv = m.upper()
+            katago_moves.append([c.upper(), "pass" if mv == "PASS" else mv])
+
         request = {
-            "id": str(self._request_id),
+            "id": req_id,
             "moves": katago_moves,
             "rules": rules,
             "komi": komi,
             "boardXSize": board_size,
             "boardYSize": board_size,
-            "analyzeTurns": [len(katago_moves)],  # Analyze current position
+            "analyzeTurns": [len(katago_moves)],
         }
-        
-        responses = self.query(json.dumps(request), 1)
-        
+        responses = await self.query(json.dumps(request), req_id, expected=1)
         if not responses:
             return "", None
-        
         try:
             result = json.loads(responses[-1])
-            
-            # Get best move from moveInfos
-            move_infos = result.get("moveInfos", [])
+            move_infos = result.get("moveInfos") or []
+            win_rate = result.get("rootInfo", {}).get("winrate")
             if not move_infos:
-                return "pass", result.get("rootInfo", {}).get("winrate")
-            
-            best_move = move_infos[0]
-            move = best_move.get("move", "pass")
-            
-            # Get win rate from rootInfo
-            root_info = result.get("rootInfo", {})
-            win_rate = root_info.get("winrate")
-            
-            return move.upper(), win_rate
-        
+                return "pass", win_rate
+            return move_infos[0].get("move", "pass").upper(), win_rate
         except (json.JSONDecodeError, KeyError, IndexError) as e:
-            print(f"Error parsing KataGo response: {e}")
+            print(f"Error parsing KataGo response: {e}", flush=True)
             return "", None
 
-    def get_analysis(self, moves: List[List[str]], rules: str, komi: float,
-                     color: str, board_size: int = 19) -> float:
-        """Get win rate for a position."""
-        _, win_rate = self.get_move(moves, rules, komi, color, board_size)
+    async def get_analysis(self, *args, **kwargs) -> float:
+        _, win_rate = await self.get_move(*args, **kwargs)
         return win_rate if win_rate is not None else 0.5
 
-    def shutdown(self) -> None:
-        if self._proc.poll() is None:
-            try:
-                os.killpg(self._proc.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                return
 
+# =============================================================================
+# FastAPI app
+# =============================================================================
 
-# Global engine instance
 app = FastAPI(title="KataGo Analysis Server")
 engine: Optional[AnalysisEngine] = None
 
 
 @app.on_event("startup")
-def _startup() -> None:
+async def _startup() -> None:
     global engine
-    cmd = build_command()
-    engine = AnalysisEngine(cmd)
+    engine = AnalysisEngine(build_command())
+    await engine.start()
 
 
 @app.on_event("shutdown")
-def _shutdown() -> None:
+async def _shutdown() -> None:
     if engine is not None:
-        engine.shutdown()
+        await engine.shutdown()
 
 
 @app.post("/analysis")
 async def analysis(request: Request) -> Response:
-    """Raw KataGo analysis API endpoint."""
-    if engine is None:
-        raise HTTPException(status_code=500, detail="Analysis engine not ready")
+    """Raw KataGo analysis API. Body is a single-line JSON query."""
+    if engine is None or not engine.is_alive():
+        raise HTTPException(status_code=503, detail="Engine not ready")
 
     body = await request.body()
-    raw = body.decode("utf-8")
-    line = raw.rstrip("\r\n")
+    line = body.decode("utf-8").rstrip("\r\n")
     if "\n" in line or "\r" in line:
         raise HTTPException(status_code=400, detail="JSON must be a single line")
 
@@ -307,8 +349,10 @@ async def analysis(request: Request) -> Response:
     except json.JSONDecodeError as exc:
         raise HTTPException(status_code=400, detail=f"Invalid JSON: {exc}") from exc
 
-    if "id" not in payload:
+    req_id = payload.get("id")
+    if not req_id:
         raise HTTPException(status_code=400, detail="Missing required field: id")
+
     analyze_turns = payload.get("analyzeTurns")
     if analyze_turns is None:
         expected = 1
@@ -318,9 +362,11 @@ async def analysis(request: Request) -> Response:
         raise HTTPException(status_code=400, detail="analyzeTurns must be a list if provided")
 
     try:
-        responses = engine.query(line, expected)
-    except TimeoutError as exc:
-        raise HTTPException(status_code=504, detail=str(exc)) from exc
+        responses = await engine.query(line, req_id, expected=expected)
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="Timed out waiting for KataGo response")
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
@@ -329,59 +375,50 @@ async def analysis(request: Request) -> Response:
 
 @app.post("/move", response_model=MoveResponse)
 async def generate_move(request: MoveRequest) -> MoveResponse:
-    """Generate the best move for a position (for game playing)."""
-    if engine is None:
-        raise HTTPException(status_code=500, detail="Analysis engine not ready")
-    
-    move, win_rate = engine.get_move(
+    if engine is None or not engine.is_alive():
+        raise HTTPException(status_code=503, detail="Engine not ready")
+    move, win_rate = await engine.get_move(
         moves=request.moves,
         rules=request.rules,
         komi=request.komi,
         color=request.color,
-        board_size=request.board_size
+        board_size=request.board_size,
     )
-    
     if not move:
         raise HTTPException(status_code=500, detail="Failed to generate move")
-    
     return MoveResponse(move=move, win_rate=win_rate)
 
 
 @app.post("/analyze_position", response_model=AnalysisPositionResponse)
 async def analyze_position(request: AnalysisPositionRequest) -> AnalysisPositionResponse:
-    """Get win rate for a position."""
-    if engine is None:
-        raise HTTPException(status_code=500, detail="Analysis engine not ready")
-    
-    win_rate = engine.get_analysis(
+    if engine is None or not engine.is_alive():
+        raise HTTPException(status_code=503, detail="Engine not ready")
+    win_rate = await engine.get_analysis(
         moves=request.moves,
         rules=request.rules,
         komi=request.komi,
         color=request.color,
-        board_size=request.board_size
+        board_size=request.board_size,
     )
-    
     return AnalysisPositionResponse(win_rate=win_rate)
 
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint."""
-    if engine is None:
-        raise HTTPException(status_code=500, detail="Engine not initialized")
+    if engine is None or not engine.is_alive():
+        raise HTTPException(status_code=503, detail="Engine not ready")
     return {"status": "healthy", "model": engine._model_path}
 
 
 if __name__ == "__main__":
     import argparse
     import uvicorn
-    
+
     parser = argparse.ArgumentParser(description="KataGo Analysis Server")
-    parser.add_argument("--port", type=int, default=None, help="Server port")
-    parser.add_argument("--host", default="0.0.0.0", help="Server host")
+    parser.add_argument("--port", type=int, default=None)
+    parser.add_argument("--host", default="0.0.0.0")
     args = parser.parse_args()
-    
+
     cfg = load_config()
-    server_cfg = cfg.get("server", {})
-    port = args.port or server_cfg.get("port", 9200)
+    port = args.port or cfg.get("server", {}).get("port", 9200)
     uvicorn.run(app, host=args.host, port=port, log_level="warning")
