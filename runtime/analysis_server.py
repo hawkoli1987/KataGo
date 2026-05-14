@@ -24,8 +24,10 @@ Usage:
 """
 
 import asyncio
+import fcntl
 import json
 import os
+import re
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -40,6 +42,11 @@ DEFAULT_ANALYSIS_CONFIG = ROOT_DIR / "assets" / "bin" / "katago-trt" / "analysis
 STDERR_LOG = ROOT_DIR / "runtime" / "analysis_server.stderr.log"
 ANALYSIS_TIMEOUT_SEC = 120
 STARTUP_WAIT_SEC = 3
+STDOUT_PIPE_SIZE = 1 << 20  # 1 MB — attempted stdout buffer expansion (best-effort)
+# Safe to keep high now that the asyncio StreamReader buffer is enlarged (see
+# `limit=4 * 1024 * 1024` in create_subprocess_exec). 40 is the original target;
+# overridable via env for stress testing.
+MAX_IN_FLIGHT_PER_WORKER = int(os.environ.get("MAX_IN_FLIGHT_PER_WORKER", "40"))
 
 
 # =============================================================================
@@ -116,9 +123,11 @@ class AnalysisEngine:
     routed back by KataGo's `id` field via a single background reader task.
     """
 
-    def __init__(self, cmd: List[str]) -> None:
+    def __init__(self, cmd: List[str], gpu_id: Optional[int] = None, worker_id: int = 0) -> None:
         self._cmd = cmd
         self._model_path = cmd[-1]
+        self._gpu_id = gpu_id
+        self._worker_id = worker_id
         self._proc: Optional[asyncio.subprocess.Process] = None
         self._reader_task: Optional[asyncio.Task] = None
         self._stderr_task: Optional[asyncio.Task] = None
@@ -130,19 +139,41 @@ class AnalysisEngine:
         self._expected: Dict[str, int] = {}
         self._done_count: Dict[str, int] = {}
 
+        # Counter for routing decisions (number of in-flight requests on this worker)
+        self.in_flight: int = 0
+
         # For internally-generated queries (/move, /analyze_position)
         self._internal_id = 0
 
     # ---------------- lifecycle ----------------
 
     async def start(self) -> None:
-        print(f"Starting KataGo: {' '.join(self._cmd)}", flush=True)
+        env = os.environ.copy()
+        if self._gpu_id is not None:
+            env["CUDA_VISIBLE_DEVICES"] = str(self._gpu_id)
+        print(f"[worker {self._worker_id}] Starting KataGo on GPU "
+              f"{self._gpu_id if self._gpu_id is not None else 'default'}", flush=True)
+        # limit=4 MB raises the StreamReader internal buffer threshold. With the
+        # default 64 KB, a burst of 16+ KataGo responses (~8 KB each) overflows
+        # the buffer → asyncio calls pause_reading() → uvloop stops draining
+        # the socket → kernel socket buffer fills → KataGo's write() blocks →
+        # analysis threads back up on the stdout mutex → futex deadlock.
+        # 4 MB easily absorbs even a 40-response burst.
         self._proc = await asyncio.create_subprocess_exec(
             *self._cmd,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            limit=4 * 1024 * 1024,
+            env=env,
         )
+        # Increase stdout I/O buffer to 1 MB to prevent KataGo stdout-write
+        # deadlock when many large responses (4–8 KB each) are in flight.
+        try:
+            self._expand_stdout_buf(self._proc, STDOUT_PIPE_SIZE)
+            print(f"[worker {self._worker_id}] stdout buffer expanded to {STDOUT_PIPE_SIZE // 1024} KB", flush=True)
+        except Exception as e:
+            print(f"[worker {self._worker_id}] Warning: could not expand stdout buffer: {e}", flush=True)
         self._reader_task = asyncio.create_task(self._read_loop(), name="katago_reader")
         self._stderr_task = asyncio.create_task(self._stderr_loop(), name="katago_stderr")
 
@@ -166,6 +197,61 @@ class AnalysisEngine:
 
     def is_alive(self) -> bool:
         return self._proc is not None and self._proc.returncode is None
+
+    @staticmethod
+    def _expand_stdout_buf(proc: asyncio.subprocess.Process, size: int) -> None:
+        """Increase the stdout I/O buffer of a KataGo subprocess (Linux only).
+
+        Tries three strategies in order:
+        1. fileno() on the asyncio transport (uvloop's ReadUnixTransport exposes this)
+        2. _pipe.fileno() on the transport (CPython asyncio ReadPipeTransport)
+        3. /proc filesystem: works for pipes (same inode at both ends)
+        """
+        import socket as _socket
+
+        # Strategy 1 & 2: get fd from the asyncio/uvloop transport
+        our_fd = None
+        try:
+            pipe_transport = proc._transport.get_pipe_transport(1)  # type: ignore[attr-defined]
+            if hasattr(pipe_transport, 'fileno'):
+                our_fd = pipe_transport.fileno()  # uvloop path
+            elif hasattr(pipe_transport, '_pipe'):
+                our_fd = pipe_transport._pipe.fileno()  # CPython asyncio path
+        except Exception:
+            pass
+
+        # Strategy 3: /proc scan (reliable for pipes, fails for socket pairs)
+        if our_fd is None:
+            stdout_link = os.readlink(f"/proc/{proc.pid}/fd/1")
+            m = re.match(r'(pipe|socket):\[(\d+)\]', stdout_link)
+            if m:
+                target = f"{m.group(1)}:[{m.group(2)}]"
+                for name in os.listdir("/proc/self/fd"):
+                    try:
+                        fd = int(name)
+                        if os.readlink(f"/proc/self/fd/{fd}") == target:
+                            our_fd = fd
+                            break
+                    except (ValueError, OSError):
+                        continue
+
+        if our_fd is None:
+            raise RuntimeError("Could not determine stdout fd")
+
+        # Apply the buffer expansion based on fd type
+        stdout_link = os.readlink(f"/proc/{proc.pid}/fd/1")
+        if stdout_link.startswith("pipe:"):
+            F_SETPIPE_SZ = 1031  # Linux constant, not always in fcntl module
+            fcntl.fcntl(our_fd, F_SETPIPE_SZ, size)
+        else:
+            # Socket (uvloop socketpairs): set SO_RCVBUF on our read end.
+            # Linux doubles the value internally; requesting 1 MB → ~2 MB actual.
+            duped = os.dup(our_fd)
+            sock = _socket.socket(fileno=duped)
+            try:
+                sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_RCVBUF, size)
+            finally:
+                sock.close()  # closes duped; original our_fd is unaffected
 
     # ---------------- background tasks ----------------
 
@@ -254,6 +340,7 @@ class AnalysisEngine:
         self._expected[req_id] = expected
         self._responses[req_id] = []
         self._done_count[req_id] = 0
+        self.in_flight += 1
 
         try:
             async with self._write_lock:
@@ -266,6 +353,7 @@ class AnalysisEngine:
             self._expected.pop(req_id, None)
             self._responses.pop(req_id, None)
             self._done_count.pop(req_id, None)
+            self.in_flight -= 1
 
     async def get_move(
         self,
@@ -313,18 +401,147 @@ class AnalysisEngine:
 
 
 # =============================================================================
+# Multi-GPU pool — round-robin / least-loaded across N AnalysisEngine workers
+# =============================================================================
+
+class AnalysisEnginePool:
+    """Pool of AnalysisEngine workers, each pinned to a different GPU.
+
+    Routes incoming queries to the worker with the fewest in-flight requests
+    (least-loaded), which naturally balances under varying request sizes.
+    """
+
+    def __init__(self, cmd: List[str], num_workers: int) -> None:
+        assert num_workers >= 1
+        self._workers: List[AnalysisEngine] = [
+            AnalysisEngine(cmd, gpu_id=i, worker_id=i) for i in range(num_workers)
+        ]
+        self._internal_id = 0
+
+    async def start(self) -> None:
+        # Start workers in parallel; their TensorRT engine builds run concurrently.
+        await asyncio.gather(*(w.start() for w in self._workers))
+
+    async def shutdown(self) -> None:
+        await asyncio.gather(*(w.shutdown() for w in self._workers), return_exceptions=True)
+
+    def is_alive(self) -> bool:
+        return all(w.is_alive() for w in self._workers)
+
+    @property
+    def model_path(self) -> str:
+        return self._workers[0]._model_path
+
+    def _pick_worker(self) -> "AnalysisEngine":
+        # Least-loaded by in-flight count; ties broken by worker order.
+        return min(self._workers, key=lambda w: w.in_flight)
+
+    async def query(self, line: str, req_id: str, expected: int = 1,
+                    timeout: float = ANALYSIS_TIMEOUT_SEC) -> List[str]:
+        worker = self._pick_worker()
+        if worker.in_flight >= MAX_IN_FLIGHT_PER_WORKER:
+            raise OverflowError(
+                f"All workers at capacity (min in_flight={worker.in_flight} "
+                f">= {MAX_IN_FLIGHT_PER_WORKER})"
+            )
+        return await worker.query(line, req_id, expected=expected, timeout=timeout)
+
+    async def get_move(self, *args, **kwargs):
+        # /move and /analyze_position generate their own request ids; route the
+        # whole call to one worker so it stays self-consistent.
+        worker = self._pick_worker()
+        return await worker.get_move(*args, **kwargs)
+
+    async def get_analysis(self, *args, **kwargs) -> float:
+        worker = self._pick_worker()
+        return await worker.get_analysis(*args, **kwargs)
+
+    async def monitor_loop(self, interval: float = 10.0, stall_threshold: int = 20) -> None:
+        """Periodically probe workers whose in_flight exceeds stall_threshold.
+
+        When a worker looks stalled, reads /proc/<pid>/wchan (what kernel call
+        it's sleeping in) and /proc/<pid>/status (thread/memory snapshot).
+        This pinpoints whether the deadlock is a pipe/socket write-block,
+        a mutex wait, a CUDA sync, or something else.
+        """
+        # Track how many consecutive polls each worker has been above threshold.
+        consecutive: Dict[int, int] = {w._worker_id: 0 for w in self._workers}
+
+        while True:
+            await asyncio.sleep(interval)
+            for w in self._workers:
+                if w.in_flight < stall_threshold:
+                    consecutive[w._worker_id] = 0
+                    continue
+
+                consecutive[w._worker_id] += 1
+                pid = w._proc.pid if w._proc else None
+
+                if pid is None:
+                    print(
+                        f"[monitor] worker {w._worker_id} in_flight={w.in_flight} "
+                        f"(consecutive={consecutive[w._worker_id]}) — process is None",
+                        flush=True,
+                    )
+                    continue
+
+                # Read wchan (the kernel wait channel — what syscall it's blocked in).
+                try:
+                    wchan = Path(f"/proc/{pid}/wchan").read_text().strip()
+                except OSError:
+                    wchan = "unreadable"
+
+                # Read the first few lines of /proc/<pid>/status for thread/vm info.
+                try:
+                    status_lines = Path(f"/proc/{pid}/status").read_text().splitlines()
+                    keep = {"State", "Threads", "VmRSS", "voluntary_ctxt_switches",
+                            "nonvoluntary_ctxt_switches"}
+                    status_snippet = {
+                        line.split(":")[0].strip(): line.split(":", 1)[1].strip()
+                        for line in status_lines
+                        if line.split(":")[0].strip() in keep
+                    }
+                except OSError:
+                    status_snippet = {}
+
+                # Aggregate per-thread wchans (shows how many threads are blocked where).
+                thread_wchans: Dict[str, int] = {}
+                try:
+                    for tid in os.listdir(f"/proc/{pid}/task"):
+                        tw = Path(f"/proc/{pid}/task/{tid}/wchan").read_text().strip()
+                        thread_wchans[tw] = thread_wchans.get(tw, 0) + 1
+                except OSError:
+                    pass
+
+                pending_count = len(w._pending)
+
+                print(
+                    f"[monitor] worker {w._worker_id} STALLED "
+                    f"in_flight={w.in_flight} pending={pending_count} "
+                    f"consecutive={consecutive[w._worker_id]} "
+                    f"pid={pid} wchan={wchan!r} "
+                    f"thread_wchans={dict(sorted(thread_wchans.items(), key=lambda x: -x[1]))} "
+                    f"status={status_snippet}",
+                    flush=True,
+                )
+
+
+# =============================================================================
 # FastAPI app
 # =============================================================================
 
 app = FastAPI(title="KataGo Analysis Server")
-engine: Optional[AnalysisEngine] = None
+engine: Optional["AnalysisEnginePool"] = None
 
 
 @app.on_event("startup")
 async def _startup() -> None:
     global engine
-    engine = AnalysisEngine(build_command())
+    num_workers = int(os.environ.get("NUM_WORKERS", "1"))
+    print(f"Launching {num_workers} worker(s)", flush=True)
+    engine = AnalysisEnginePool(build_command(), num_workers=num_workers)
     await engine.start()
+    asyncio.create_task(engine.monitor_loop(), name="worker_monitor")
 
 
 @app.on_event("shutdown")
@@ -365,6 +582,8 @@ async def analysis(request: Request) -> Response:
         responses = await engine.query(line, req_id, expected=expected)
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail="Timed out waiting for KataGo response")
+    except OverflowError as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except RuntimeError as exc:
@@ -407,7 +626,9 @@ async def analyze_position(request: AnalysisPositionRequest) -> AnalysisPosition
 async def health_check():
     if engine is None or not engine.is_alive():
         raise HTTPException(status_code=503, detail="Engine not ready")
-    return {"status": "healthy", "model": engine._model_path}
+    return {"status": "healthy", "model": engine.model_path,
+            "num_workers": len(engine._workers),
+            "in_flight": [w.in_flight for w in engine._workers]}
 
 
 if __name__ == "__main__":

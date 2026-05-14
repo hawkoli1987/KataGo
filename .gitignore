@@ -107,6 +107,12 @@ assets/
 !assets/models/manifest.json
 
 log
+log2
 cache
 pyrightconfig.json
 .venv
+
+# Working artifacts (Claude Code state, wandb runs, one-off migration notes)
+.claude/
+wandb/
+migration.md
