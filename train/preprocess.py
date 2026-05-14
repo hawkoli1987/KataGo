@@ -11,9 +11,16 @@ Usage:
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional
+
+# Retry suffix that analyze_offline.py adds to query ids when retrying after a
+# timeout (to avoid HTTP 409 collisions with the still-pending first attempt).
+# The suffix may end up persisted in the moves jsonl when the response from a
+# retry attempt is the one that succeeds; we strip it here for id matching.
+_RETRY_SUFFIX_RE = re.compile(r'_r\d+$')
 
 import pandas as pd
 import yaml
@@ -182,11 +189,14 @@ def process_split(
                 position_data = json.loads(pos_line.strip())
                 move_data = json.loads(move_line.strip())
                 
-                # Verify id match
+                # Verify id match — tolerate a "_r<N>" retry suffix on move_id
+                # left behind when a retried query was the one that succeeded.
                 pos_id = position_data.get("id")
                 move_id = move_data.get("id")
-                
-                if pos_id != move_id:
+                move_id_normalized = (_RETRY_SUFFIX_RE.sub('', move_id)
+                                      if move_id else None)
+
+                if pos_id != move_id_normalized:
                     print(f"  WARNING: Line {line_num}: ID mismatch: {pos_id} != {move_id}")
                     error_count += 1
                     continue

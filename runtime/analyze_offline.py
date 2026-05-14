@@ -33,7 +33,7 @@ import aiohttp
 class AnalysisConfig:
     """Configuration for analysis."""
     endpoint: str
-    timeout: float = 60.0
+    timeout: float = 130.0
     max_concurrent: int = 512
     retry_count: int = 3
     retry_delay: float = 1.0
@@ -74,14 +74,28 @@ async def analyze_single(
     request_start = time.time()
     last_error = None
     async with semaphore:
-        for attempt in range(config.retry_count):
+        attempt = 0
+        capacity_wait = 5.0  # initial backoff for 429 responses
+        while attempt < config.retry_count:
+            # Use a suffixed ID on retries to avoid 409 collision with the previous
+            # attempt still held in the server's pending dict.
+            retry_query = ({**query, 'id': f"{query['id']}_r{attempt}"}
+                           if attempt > 0 else query)
             try:
                 response = await call_katago_api(
-                    session, config.endpoint, query, config.timeout
+                    session, config.endpoint, retry_query, config.timeout
                 )
+                # Strip the retry suffix so downstream consumers see the original id.
+                if attempt > 0 and isinstance(response, dict) and 'id' in response:
+                    response['id'] = query['id']
                 request_time = time.time() - request_start
                 return line_idx, response, request_time, None
             except aiohttp.ClientResponseError as e:
+                if e.status == 429:
+                    # Server at capacity: backoff without consuming retry budget.
+                    await asyncio.sleep(capacity_wait)
+                    capacity_wait = min(capacity_wait * 2, 60.0)
+                    continue
                 last_error = f"HTTP_{e.status}"
             except aiohttp.ClientError as e:
                 last_error = f"ClientError_{type(e).__name__}"
@@ -94,6 +108,7 @@ async def analyze_single(
                 error_tracker[last_error] = error_tracker.get(last_error, 0) + 1
             if attempt < config.retry_count - 1:
                 await asyncio.sleep(config.retry_delay * (attempt + 1))
+            attempt += 1
 
         request_time = time.time() - request_start
         return line_idx, {}, request_time, last_error
@@ -290,8 +305,8 @@ def parse_args() -> argparse.Namespace:
                         help='KataGo analysis endpoint URL')
     parser.add_argument('--max-concurrent', '-c', type=int, default=512,
                         help='Max concurrent requests (default: 512)')
-    parser.add_argument('--timeout', type=float, default=60.0,
-                        help='Request timeout in seconds (default: 60)')
+    parser.add_argument('--timeout', type=float, default=130.0,
+                        help='Request timeout in seconds (default: 130; must exceed server timeout of 120s)')
     parser.add_argument('--chunk-size', type=int, default=50_000,
                         help='Queries per checkpoint (default: 50000)')
     parser.add_argument('--limit', '-n', type=int, default=None,
